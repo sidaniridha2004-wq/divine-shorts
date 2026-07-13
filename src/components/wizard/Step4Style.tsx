@@ -1,13 +1,54 @@
+import { useMemo, useState, type CSSProperties } from "react";
 import { useProjectState } from "@/lib/project-state";
-import { THEMES } from "@/lib/themes";
+import { THEMES, THEME_CATEGORIES, type GeneratedTheme } from "@/lib/themes";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
+import { Shuffle } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+
+function generatedStyle(g: GeneratedTheme): CSSProperties {
+  switch (g.type) {
+    case "solid":
+      return { background: g.color };
+    case "gradient":
+      return { background: `linear-gradient(135deg, ${g.from}, ${g.to})` };
+    case "particles":
+      return {
+        background: `radial-gradient(circle at 25% 30%, ${g.color}33 0%, transparent 30%), radial-gradient(circle at 70% 60%, ${g.color}2e 0%, transparent 25%), ${g.bg}`,
+      };
+    case "bokeh":
+      return {
+        background: `radial-gradient(circle at 30% 40%, ${g.color}44 0%, transparent 35%), radial-gradient(circle at 75% 65%, ${g.color}33 0%, transparent 30%), ${g.bg}`,
+      };
+    case "pattern":
+      return {
+        background: `repeating-linear-gradient(45deg, ${g.fg}22 0 1px, transparent 1px 24px), repeating-linear-gradient(-45deg, ${g.fg}22 0 1px, transparent 1px 24px), ${g.bg}`,
+      };
+  }
+}
 
 export function Step4Style() {
   const { settings, update } = useProjectState();
+  const [category, setCategory] = useState<string>("all");
+  const [q, setQ] = useState("");
+  const [hoverId, setHoverId] = useState<string | null>(null);
+
+  const shown = useMemo(() => {
+    let list = THEMES;
+    if (category !== "all") list = list.filter((t) => t.category === category);
+    const query = q.trim().toLowerCase();
+    if (query) list = list.filter((t) => t.name.toLowerCase().includes(query));
+    return list;
+  }, [category, q]);
+
+  const randomTheme = () => {
+    const t = THEMES[Math.floor(Math.random() * THEMES.length)];
+    update({ themeId: t.id, customBg: null });
+    toast.success(`Background: ${t.name}`);
+  };
 
   const handleUpload = (file: File) => {
     if (file.size > 50 * 1024 * 1024) {
@@ -26,35 +67,70 @@ export function Step4Style() {
   return (
     <div className="space-y-6">
       <div>
-        <Label className="mb-3 block">Theme</Label>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-          {THEMES.map((t) => {
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <Label>Theme ({THEMES.length} backgrounds)</Label>
+          <Button variant="ghost" size="sm" onClick={randomTheme}>
+            <Shuffle className="mr-1 h-4 w-4" /> Random
+          </Button>
+        </div>
+        <div className="mb-3 flex flex-wrap gap-2">
+          {[{ id: "all", name: "All" }, ...THEME_CATEGORIES].map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => setCategory(c.id)}
+              className={`rounded-full border px-3 py-1.5 text-xs ${
+                category === c.id
+                  ? "border-accent bg-accent/20 text-accent"
+                  : "border-border bg-card text-muted-foreground hover:border-accent/50"
+              }`}
+            >
+              {c.name}
+            </button>
+          ))}
+        </div>
+        <Input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search backgrounds…"
+          className="mb-3"
+        />
+        <div className="grid max-h-[420px] grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3">
+          {shown.map((t) => {
             const active = settings.themeId === t.id && !settings.customBg;
+            const hovering = hoverId === t.id;
             return (
               <button
                 key={t.id}
                 type="button"
                 onClick={() => update({ themeId: t.id, customBg: null })}
+                onMouseEnter={() => setHoverId(t.id)}
+                onMouseLeave={() => setHoverId((h) => (h === t.id ? null : h))}
                 className={`group relative aspect-[9/16] overflow-hidden rounded-xl border transition ${
                   active
                     ? "border-accent shadow-gold"
                     : "border-border hover:border-accent/50"
                 }`}
               >
-                {t.generated === "dark-gradient" && (
-                  <div className="absolute inset-0 emerald-gradient" />
+                {t.generated && (
+                  <div className="absolute inset-0" style={generatedStyle(t.generated)} />
                 )}
-                {t.generated === "gold-particles" && (
-                  <div className="absolute inset-0 bg-black">
-                    <div className="absolute inset-0 gold-gradient opacity-20" />
-                  </div>
-                )}
-                {t.poster && (
+                {t.poster && !(hovering && t.video) && (
                   <img
                     src={t.poster}
                     alt={t.name}
                     className="absolute inset-0 h-full w-full object-cover"
                     loading="lazy"
+                  />
+                )}
+                {t.video && hovering && (
+                  <video
+                    src={t.video}
+                    autoPlay
+                    muted
+                    loop
+                    playsInline
+                    className="absolute inset-0 h-full w-full object-cover"
                   />
                 )}
                 <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-2 text-left text-xs font-medium text-white">
@@ -63,6 +139,11 @@ export function Step4Style() {
               </button>
             );
           })}
+          {shown.length === 0 && (
+            <p className="col-span-full py-6 text-center text-sm text-muted-foreground">
+              No backgrounds match "{q}"
+            </p>
+          )}
         </div>
       </div>
 

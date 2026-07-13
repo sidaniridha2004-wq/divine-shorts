@@ -99,16 +99,7 @@ function DailyPage() {
         <div className="mt-10 flex justify-center">
           <Link
             to="/create"
-            search={{ p: undefined, id: undefined }}
-            onClick={() => {
-              // preselect via localStorage marker — the editor will honor this
-              try {
-                localStorage.setItem(
-                  "quranreels:daily-preselect",
-                  JSON.stringify({ chapterId: pick.chapterId, ayah: pick.ayah }),
-                );
-              } catch {}
-            }}
+            search={{ surah: pick.chapterId, from: pick.ayah, to: pick.ayah }}
           >
             <Button size="lg" className="bg-accent text-accent-foreground hover:opacity-90">
               Make video from this verse →

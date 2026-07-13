@@ -108,6 +108,25 @@ export async function getAyahAudioSegments(
   }
 }
 
+export type RecitationResource = {
+  id: number;
+  reciter_name: string;
+  style: string | null;
+  translated_name?: { name: string; language_name?: string };
+};
+
+// Full list of available recitations (reciters) from Quran.com
+export async function getRecitations(): Promise<RecitationResource[]> {
+  try {
+    const data = await fetchJson<{ recitations: RecitationResource[] }>(
+      "/resources/recitations?language=en",
+    );
+    return data.recitations ?? [];
+  } catch {
+    return [];
+  }
+}
+
 export async function searchVerses(query: string): Promise<
   { verse_key: string; text: string; translation: string }[]
 > {

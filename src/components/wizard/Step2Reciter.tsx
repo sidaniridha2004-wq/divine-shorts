@@ -1,18 +1,97 @@
-import { useRef, useState } from "react";
-import { RECITERS, AMBIENT_TRACKS } from "@/lib/reciters";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  RECITERS,
+  AMBIENT_TRACKS,
+  ARABIC_NAMES,
+  RECITER_ACCENTS,
+  initialsOf,
+  type Reciter,
+} from "@/lib/reciters";
 import { useProjectState } from "@/lib/project-state";
-import { getAyahAudioSegments } from "@/lib/quran-api";
+import { getAyahAudioSegments, getRecitations } from "@/lib/quran-api";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
-import { Play, Pause, Loader2 } from "lucide-react";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Play, Pause, Loader2, Star } from "lucide-react";
 import { toast } from "sonner";
+
+const FAV_KEY = "quranreels:fav-reciters";
+
+function loadFavs(): number[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(FAV_KEY) ?? "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
 export function Step2Reciter() {
   const { settings, update } = useProjectState();
+  const [reciters, setReciters] = useState<Reciter[] | null>(null);
+  const [query, setQuery] = useState("");
+  const [favs, setFavs] = useState<number[]>(loadFavs);
   const [previewingId, setPreviewingId] = useState<number | null>(null);
   const [loadingId, setLoadingId] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Fetch the full reciter catalog from Quran.com; fall back to the curated list.
+  useEffect(() => {
+    getRecitations()
+      .then((list) => {
+        if (!list.length) {
+          setReciters(RECITERS);
+          return;
+        }
+        setReciters(
+          list.map((r, i) => {
+            const name = r.translated_name?.name || r.reciter_name;
+            return {
+              id: r.id,
+              name,
+              arabic: ARABIC_NAMES[r.id] ?? "",
+              style: r.style || "Murattal",
+              accent: RECITER_ACCENTS[i % RECITER_ACCENTS.length],
+              initials: initialsOf(name),
+            };
+          }),
+        );
+      })
+      .catch(() => setReciters(RECITERS));
+  }, []);
+
+  // Stop preview audio when leaving this step
+  useEffect(() => () => audioRef.current?.pause(), []);
+
+  const toggleFav = (id: number) => {
+    setFavs((f) => {
+      const next = f.includes(id) ? f.filter((x) => x !== id) : [...f, id];
+      try {
+        localStorage.setItem(FAV_KEY, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const shown = useMemo(() => {
+    const base = reciters ?? [];
+    const q = query.trim().toLowerCase();
+    const filtered = q
+      ? base.filter(
+          (r) =>
+            r.name.toLowerCase().includes(q) ||
+            r.arabic.includes(query.trim()) ||
+            r.style.toLowerCase().includes(q),
+        )
+      : base;
+    // Favorites pinned to the top (stable order otherwise)
+    return [...filtered].sort(
+      (a, b) => Number(favs.includes(b.id)) - Number(favs.includes(a.id)),
+    );
+  }, [reciters, query, favs]);
 
   const playPreview = async (reciterId: number) => {
     if (previewingId === reciterId) {
@@ -23,14 +102,15 @@ export function Step2Reciter() {
     setLoadingId(reciterId);
     try {
       const segs = await getAyahAudioSegments(reciterId, settings.chapterId);
-      const first = segs.find((s) => {
-        const [, v] = s.verse_key.split(":").map(Number);
-        return v === settings.fromAyah;
-      }) ?? segs[0];
-      if (!first) {
-        toast.error("Couldn't load recitation, try another reciter");
+      if (!segs.length) {
+        toast.error("This reciter has no audio for this surah — try another");
         return;
       }
+      const first =
+        segs.find((s) => {
+          const [, v] = s.verse_key.split(":").map(Number);
+          return v === settings.fromAyah;
+        }) ?? segs[0];
       if (!audioRef.current) audioRef.current = new Audio();
       audioRef.current.src = first.url;
       audioRef.current.onended = () => setPreviewingId(null);
@@ -46,58 +126,100 @@ export function Step2Reciter() {
   return (
     <div className="space-y-6">
       <div>
-        <Label className="mb-3 block">Choose a reciter</Label>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-          {RECITERS.map((r) => {
-            const active = settings.reciterId === r.id;
-            const playing = previewingId === r.id;
-            const loading = loadingId === r.id;
-            return (
-              <button
-                key={r.id}
-                type="button"
-                onClick={() => update({ reciterId: r.id })}
-                className={`group flex flex-col items-center gap-2 rounded-xl border p-3 text-center transition ${
-                  active
-                    ? "border-accent bg-accent/10 shadow-gold"
-                    : "border-border bg-card hover:border-accent/50"
-                }`}
-              >
-                <div
-                  className={`grid h-14 w-14 place-items-center rounded-full bg-gradient-to-br ${r.accent} font-display text-lg font-bold text-white`}
-                >
-                  {r.initials}
-                </div>
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">{r.name}</div>
-                  <div dir="rtl" className="truncate font-arabic text-xs text-muted-foreground">
-                    {r.arabic}
-                  </div>
-                  <div className="text-[10px] uppercase tracking-widest text-accent">
-                    {r.style}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  className="mt-1 inline-flex items-center gap-1 rounded-full border border-border bg-background/60 px-3 py-1 text-xs hover:bg-muted"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    playPreview(r.id);
-                  }}
-                >
-                  {loading ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : playing ? (
-                    <Pause className="h-3 w-3" />
-                  ) : (
-                    <Play className="h-3 w-3" />
-                  )}
-                  Preview
-                </button>
-              </button>
-            );
-          })}
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <Label>Choose a reciter</Label>
+          <span className="text-xs text-muted-foreground">
+            {reciters ? `${shown.length} reciters` : "Loading…"}
+          </span>
         </div>
+        <Input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search reciters…"
+          className="mb-3"
+        />
+        {!reciters ? (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} className="h-36 w-full rounded-xl" />
+            ))}
+          </div>
+        ) : (
+          <div className="grid max-h-[420px] grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3">
+            {shown.map((r) => {
+              const active = settings.reciterId === r.id;
+              const playing = previewingId === r.id;
+              const loading = loadingId === r.id;
+              const fav = favs.includes(r.id);
+              return (
+                <div
+                  key={r.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => update({ reciterId: r.id })}
+                  onKeyDown={(e) => e.key === "Enter" && update({ reciterId: r.id })}
+                  className={`group relative flex cursor-pointer flex-col items-center gap-2 rounded-xl border p-3 text-center transition ${
+                    active
+                      ? "border-accent bg-accent/10 shadow-gold"
+                      : "border-border bg-card hover:border-accent/50"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    aria-label={fav ? "Remove from favorites" : "Add to favorites"}
+                    className="absolute right-2 top-2 rounded p-1 text-muted-foreground hover:text-accent"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleFav(r.id);
+                    }}
+                  >
+                    <Star
+                      className={`h-4 w-4 ${fav ? "fill-accent text-accent" : ""}`}
+                    />
+                  </button>
+                  <div
+                    className={`grid h-14 w-14 place-items-center rounded-full bg-gradient-to-br ${r.accent} font-display text-lg font-bold text-white`}
+                  >
+                    {r.initials}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{r.name}</div>
+                    {r.arabic && (
+                      <div dir="rtl" className="truncate font-arabic text-xs text-muted-foreground">
+                        {r.arabic}
+                      </div>
+                    )}
+                    <div className="text-[10px] uppercase tracking-widest text-accent">
+                      {r.style}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="mt-1 inline-flex items-center gap-1 rounded-full border border-border bg-background/60 px-3 py-1 text-xs hover:bg-muted"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      playPreview(r.id);
+                    }}
+                  >
+                    {loading ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : playing ? (
+                      <Pause className="h-3 w-3" />
+                    ) : (
+                      <Play className="h-3 w-3" />
+                    )}
+                    Preview
+                  </button>
+                </div>
+              );
+            })}
+            {shown.length === 0 && (
+              <p className="col-span-full py-6 text-center text-sm text-muted-foreground">
+                No reciters match "{query}"
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">

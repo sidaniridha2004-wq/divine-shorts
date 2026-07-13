@@ -82,13 +82,17 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         content:
           "Create stunning Quran verse videos for TikTok, Instagram Reels, and YouTube Shorts in seconds. Choose a reciter, style, and export to MP4.",
       },
-      { property: "og:title", content: "QuranReels Pro" },
+      { property: "og:title", content: "QuranReels Pro — Turn Quran verses into beautiful videos" },
       {
         property: "og:description",
-        content: "Turn Quran verses into beautiful videos in seconds.",
+        content: "Create stunning Quran verse videos for TikTok, Instagram Reels, and YouTube Shorts in seconds. Choose a reciter, style, and export to MP4.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
+      { name: "twitter:title", content: "QuranReels Pro — Turn Quran verses into beautiful videos" },
+      { name: "twitter:description", content: "Create stunning Quran verse videos for TikTok, Instagram Reels, and YouTube Shorts in seconds. Choose a reciter, style, and export to MP4." },
+      { property: "og:image", content: "https://storage.googleapis.com/gpt-engineer-file-uploads/attachments/og-images/5fd19f47-6242-4039-a1f9-9595c1ebcc93" },
+      { name: "twitter:image", content: "https://storage.googleapis.com/gpt-engineer-file-uploads/attachments/og-images/5fd19f47-6242-4039-a1f9-9595c1ebcc93" },
     ],
     links: [
       { rel: "stylesheet", href: appCss },

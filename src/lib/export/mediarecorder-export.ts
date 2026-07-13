@@ -62,6 +62,7 @@ export async function exportVideo(
 
   recorder.start(500);
   onProgress({ phase: "recording", progress: 0.1, message: "Recording…" });
+  preview.seek(0); // always export from the very beginning so the video matches the preview
   await preview.play();
 
   const started = performance.now();

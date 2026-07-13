@@ -1,7 +1,8 @@
-// Curated reciters mapped to Quran.com recitation ids.
+// Reciters mapped to official Quran.com recitation ids.
+// The app fetches the full list dynamically (see getRecitations in quran-api);
+// this file provides the offline fallback list, Arabic display names and UI helpers.
 export type Reciter = {
   id: number; // Quran.com recitation id (verse-by-verse)
-  chapterId?: number; // chapter_recitations id (used for full-surah audio)
   name: string;
   arabic: string;
   style: string;
@@ -9,79 +10,54 @@ export type Reciter = {
   initials: string;
 };
 
+export const RECITER_ACCENTS = [
+  "from-emerald-500 to-teal-700",
+  "from-amber-500 to-yellow-700",
+  "from-rose-500 to-pink-700",
+  "from-fuchsia-500 to-purple-700",
+  "from-cyan-500 to-blue-700",
+  "from-orange-500 to-red-700",
+  "from-lime-500 to-green-700",
+  "from-purple-500 to-indigo-700",
+];
+
+// Arabic display names for known Quran.com recitation ids.
+export const ARABIC_NAMES: Record<number, string> = {
+  1: "عبد الباسط عبد الصمد",
+  2: "عبد الباسط عبد الصمد",
+  3: "عبد الرحمن السديس",
+  4: "أبو بكر الشاطري",
+  5: "هاني الرفاعي",
+  6: "محمود خليل الحصري",
+  7: "مشاري العفاسي",
+  8: "محمد صديق المنشاوي",
+  9: "محمد صديق المنشاوي",
+  10: "سعود الشريم",
+  12: "محمود خليل الحصري",
+};
+
+export function initialsOf(name: string): string {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((p) => p[0])
+    .join("")
+    .toUpperCase();
+}
+
+// Offline fallback (correct official id mapping).
 export const RECITERS: Reciter[] = [
-  {
-    id: 7,
-    chapterId: 7,
-    name: "Mishary Al-Afasy",
-    arabic: "مشاري العفاسي",
-    style: "Murattal",
-    accent: "from-emerald-500 to-teal-700",
-    initials: "MA",
-  },
-  {
-    id: 3,
-    chapterId: 3,
-    name: "Abdul Rahman Al-Sudais",
-    arabic: "عبد الرحمن السديس",
-    style: "Murattal",
-    accent: "from-amber-500 to-yellow-700",
-    initials: "AS",
-  },
-  {
-    id: 4,
-    chapterId: 4,
-    name: "Saad Al-Ghamdi",
-    arabic: "سعد الغامدي",
-    style: "Murattal",
-    accent: "from-rose-500 to-pink-700",
-    initials: "SG",
-  },
-  {
-    id: 2,
-    chapterId: 2,
-    name: "AbdulBaset AbdulSamad",
-    arabic: "عبد الباسط عبد الصمد",
-    style: "Mujawwad",
-    accent: "from-fuchsia-500 to-purple-700",
-    initials: "AB",
-  },
-  {
-    id: 1,
-    chapterId: 1,
-    name: "AbdulBaset AbdulSamad",
-    arabic: "عبد الباسط عبد الصمد",
-    style: "Murattal",
-    accent: "from-purple-500 to-indigo-700",
-    initials: "AB",
-  },
-  {
-    id: 6,
-    chapterId: 6,
-    name: "Maher Al-Muaiqly",
-    arabic: "ماهر المعيقلي",
-    style: "Murattal",
-    accent: "from-cyan-500 to-blue-700",
-    initials: "MM",
-  },
-  {
-    id: 5,
-    chapterId: 5,
-    name: "Hani Ar-Rifai",
-    arabic: "هاني الرفاعي",
-    style: "Murattal",
-    accent: "from-orange-500 to-red-700",
-    initials: "HR",
-  },
-  {
-    id: 9,
-    chapterId: 9,
-    name: "Mahmoud Khalil Al-Husary",
-    arabic: "محمود خليل الحصري",
-    style: "Murattal",
-    accent: "from-lime-500 to-green-700",
-    initials: "MH",
-  },
+  { id: 7, name: "Mishari Rashid al-Afasy", arabic: ARABIC_NAMES[7], style: "Murattal", accent: RECITER_ACCENTS[0], initials: "MA" },
+  { id: 3, name: "Abdur-Rahman as-Sudais", arabic: ARABIC_NAMES[3], style: "Murattal", accent: RECITER_ACCENTS[1], initials: "AS" },
+  { id: 4, name: "Abu Bakr al-Shatri", arabic: ARABIC_NAMES[4], style: "Murattal", accent: RECITER_ACCENTS[2], initials: "AS" },
+  { id: 1, name: "AbdulBaset AbdulSamad", arabic: ARABIC_NAMES[1], style: "Mujawwad", accent: RECITER_ACCENTS[3], initials: "AA" },
+  { id: 2, name: "AbdulBaset AbdulSamad", arabic: ARABIC_NAMES[2], style: "Murattal", accent: RECITER_ACCENTS[4], initials: "AA" },
+  { id: 5, name: "Hani ar-Rifai", arabic: ARABIC_NAMES[5], style: "Murattal", accent: RECITER_ACCENTS[5], initials: "HR" },
+  { id: 6, name: "Mahmoud Khalil Al-Husary", arabic: ARABIC_NAMES[6], style: "Murattal", accent: RECITER_ACCENTS[6], initials: "MH" },
+  { id: 9, name: "Mohamed Siddiq al-Minshawi", arabic: ARABIC_NAMES[9], style: "Murattal", accent: RECITER_ACCENTS[7], initials: "MM" },
+  { id: 10, name: "Sa'ud ash-Shuraym", arabic: ARABIC_NAMES[10], style: "Murattal", accent: RECITER_ACCENTS[0], initials: "SS" },
+  { id: 12, name: "Al-Husary (Muallim)", arabic: ARABIC_NAMES[12], style: "Muallim", accent: RECITER_ACCENTS[1], initials: "MH" },
 ];
 
 export const AMBIENT_TRACKS = [

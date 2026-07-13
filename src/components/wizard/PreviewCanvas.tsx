@@ -1,8 +1,14 @@
-import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+  forwardRef,
+  useImperativeHandle,
+} from "react";
 import { useProjectState, type ProjectSettings } from "@/lib/project-state";
-import { THEMES } from "@/lib/themes";
+import { THEMES, type GeneratedTheme } from "@/lib/themes";
 import { ARABIC_FONTS } from "@/lib/translations";
-import { RECITERS } from "@/lib/reciters";
 import { getAyahAudioSegments, getVersesByChapter, type Verse } from "@/lib/quran-api";
 
 export type PreviewHandle = {
@@ -14,6 +20,8 @@ export type PreviewHandle = {
   getAudioElement: () => HTMLAudioElement | null;
   getSegmentTimings: () => { verse_key: string; start: number; duration: number }[];
 };
+
+type Segment = { verse_key: string; url: string; start: number; duration: number };
 
 const ASPECT_DIMS: Record<string, { w: number; h: number }> = {
   "9:16": { w: 1080, h: 1920 },
@@ -28,6 +36,29 @@ function getDims(s: ProjectSettings) {
   return { w: Math.round(base.w * scale), h: Math.round(base.h * scale) };
 }
 
+// Read the real duration of an audio file from its metadata.
+// Accurate durations are essential: the text timeline must never drift
+// away from the audio (the old 5s estimate caused ayahs to get mixed up).
+function probeDuration(url: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    const a = new Audio();
+    let settled = false;
+    const done = (v: number | null) => {
+      if (settled) return;
+      settled = true;
+      a.onloadedmetadata = null;
+      a.onerror = null;
+      resolve(v);
+    };
+    a.preload = "metadata";
+    a.onloadedmetadata = () =>
+      done(Number.isFinite(a.duration) && a.duration > 0 ? a.duration : null);
+    a.onerror = () => done(null);
+    a.src = url;
+    setTimeout(() => done(null), 8000);
+  });
+}
+
 export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number, d: number) => void }>(
   function PreviewCanvas({ onProgress }, ref) {
     const { settings } = useProjectState();
@@ -36,14 +67,14 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
     const audioRef = useRef<HTMLAudioElement>(null);
     const rafRef = useRef<number | null>(null);
     const [verses, setVerses] = useState<Verse[]>([]);
-    const [segments, setSegments] = useState<
-      { verse_key: string; start: number; duration: number; url: string }[]
-    >([]);
+    const [segments, setSegments] = useState<Segment[]>([]);
     const [playing, setPlaying] = useState(false);
     const [duration, setDuration] = useState(0);
     const [ready, setReady] = useState(false);
-    const startAtRef = useRef(0);
     const localTimeRef = useRef(0);
+    // Index of the segment (= ayah) currently playing. The active ayah is
+    // always derived from this index — never from wall-clock guesses.
+    const currentSegIdxRef = useRef(0);
 
     // Load verses when chapter or translation changes
     useEffect(() => {
@@ -63,27 +94,47 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       };
     }, [settings.chapterId, settings.translationId]);
 
-    // Load audio segments when reciter/chapter changes
+    // Load audio segments when reciter/chapter/range changes
     useEffect(() => {
       let alive = true;
       setReady(false);
-      getAyahAudioSegments(settings.reciterId, settings.chapterId).then((segs) => {
+      setSegments([]);
+      setDuration(0);
+      (async () => {
+        const segs = await getAyahAudioSegments(settings.reciterId, settings.chapterId);
+        const filtered = segs
+          .filter((s) => {
+            const [, v] = s.verse_key.split(":").map(Number);
+            return v >= settings.fromAyah && v <= settings.toAyah;
+          })
+          // Guarantee playback order regardless of API ordering
+          .sort(
+            (a, b) =>
+              Number(a.verse_key.split(":")[1]) - Number(b.verse_key.split(":")[1]),
+          );
+        // Probe the real duration of every segment so timings are exact.
+        const probed = await Promise.all(filtered.map((s) => probeDuration(s.url)));
         if (!alive) return;
-        const filtered = segs.filter((s) => {
-          const [, v] = s.verse_key.split(":").map(Number);
-          return v >= settings.fromAyah && v <= settings.toAyah;
-        });
-        // Assign start times sequentially; use duration from API or estimate 5s
         let t = 0;
-        const withTiming = filtered.map((s) => {
-          const dur = (s.duration ?? 5000) / 1000 / settings.audioSpeed;
-          const entry = { ...s, start: t, duration: dur };
+        const withTiming: Segment[] = filtered.map((s, i) => {
+          // API duration is sometimes ms, sometimes seconds, often missing
+          const api = s.duration ? (s.duration > 100 ? s.duration / 1000 : s.duration) : null;
+          const raw = probed[i] ?? api ?? 5;
+          const dur = raw / settings.audioSpeed;
+          const entry = { verse_key: s.verse_key, url: s.url, start: t, duration: dur };
           t += dur;
           return entry;
         });
+        currentSegIdxRef.current = 0;
+        localTimeRef.current = 0;
         setSegments(withTiming);
         setDuration(t);
         setReady(true);
+      })().catch(() => {
+        if (alive) {
+          setSegments([]);
+          setReady(true);
+        }
       });
       return () => {
         alive = false;
@@ -124,7 +175,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
     }, [settings.themeId, settings.customBg]);
 
     const draw = useCallback(
-      (t: number) => {
+      (t: number, segIdx: number) => {
         const canvas = canvasRef.current;
         if (!canvas) return;
         const ctx = canvas.getContext("2d");
@@ -136,24 +187,8 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         }
         // Background
         const theme = THEMES.find((th) => th.id === settings.themeId);
-        if (theme?.generated === "dark-gradient") {
-          const g = ctx.createLinearGradient(0, 0, w, h);
-          g.addColorStop(0, "#0F5132");
-          g.addColorStop(1, "#0B0F0E");
-          ctx.fillStyle = g;
-          ctx.fillRect(0, 0, w, h);
-        } else if (theme?.generated === "gold-particles") {
-          ctx.fillStyle = "#0B0F0E";
-          ctx.fillRect(0, 0, w, h);
-          for (let i = 0; i < 60; i++) {
-            const x = ((i * 137 + t * 20) % w);
-            const y = ((i * 91 + t * 10) % h);
-            const r = 1 + (i % 4);
-            ctx.fillStyle = `rgba(201,162,39,${0.3 + (i % 5) * 0.1})`;
-            ctx.beginPath();
-            ctx.arc(x, y, r, 0, Math.PI * 2);
-            ctx.fill();
-          }
+        if (theme?.generated && !settings.customBg) {
+          drawGeneratedBg(ctx, theme.generated, w, h, t);
         } else {
           const v = videoRef.current as HTMLVideoElement | HTMLImageElement | null;
           if (v) {
@@ -212,6 +247,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           if (label) {
             ctx.font = `${Math.round(w * 0.022)}px Inter, sans-serif`;
             ctx.fillStyle = "rgba(245,241,232,0.6)";
+            ctx.textAlign = "left";
             const pad = w * 0.04;
             const tx =
               settings.watermark.position === "tl" || settings.watermark.position === "bl"
@@ -225,19 +261,26 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           }
         }
         // Text
-        drawText(ctx, settings, verses, segments, t, w, h);
+        drawText(ctx, settings, verses, segments, t, segIdx, w, h);
       },
       [settings, verses, segments],
     );
 
-    // rAF loop
+    // rAF render loop. Global time = start of the active segment + position
+    // inside it. This is monotonic and can never rewind to a previous ayah
+    // (audio.currentTime alone resets per segment — the source of the old bug).
     useEffect(() => {
       const loop = () => {
         const audio = audioRef.current;
         let t = localTimeRef.current;
-        if (playing && audio && !audio.paused) t = audio.currentTime;
+        const idx = currentSegIdxRef.current;
+        const seg = segments[idx];
+        if (playing && audio && seg) {
+          const inSeg = Math.min(audio.currentTime / settings.audioSpeed, seg.duration);
+          t = seg.start + inSeg;
+        }
         localTimeRef.current = t;
-        draw(t);
+        draw(t, idx);
         onProgress?.(t, duration);
         rafRef.current = requestAnimationFrame(loop);
       };
@@ -245,21 +288,23 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       return () => {
         if (rafRef.current) cancelAnimationFrame(rafRef.current);
       };
-    }, [draw, playing, duration, onProgress]);
+    }, [draw, playing, duration, onProgress, segments, settings.audioSpeed]);
 
-    // Sequence audio segments
-    const currentSegIdxRef = useRef(0);
+    // Sequence audio segments strictly via the 'ended' event
     useEffect(() => {
       const audio = audioRef.current;
       if (!audio) return;
       const onEnded = () => {
-        currentSegIdxRef.current++;
-        if (currentSegIdxRef.current < segments.length) {
-          const next = segments[currentSegIdxRef.current];
+        const nextIdx = currentSegIdxRef.current + 1;
+        if (nextIdx < segments.length) {
+          currentSegIdxRef.current = nextIdx;
+          const next = segments[nextIdx];
+          localTimeRef.current = next.start;
           audio.src = next.url;
           audio.playbackRate = settings.audioSpeed;
           audio.play().catch(() => {});
         } else {
+          // Finished: clean reset so the next play starts from the beginning
           setPlaying(false);
           currentSegIdxRef.current = 0;
           localTimeRef.current = 0;
@@ -275,10 +320,15 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         play: async () => {
           const audio = audioRef.current;
           if (!audio || !segments.length) return;
-          currentSegIdxRef.current = 0;
-          audio.src = segments[0].url;
+          const t = localTimeRef.current;
+          const resuming = !!audio.src && t > 0.05 && t < duration - 0.05;
+          if (!resuming) {
+            currentSegIdxRef.current = 0;
+            localTimeRef.current = 0;
+            audio.src = segments[0].url;
+            audio.currentTime = 0;
+          }
           audio.playbackRate = settings.audioSpeed;
-          startAtRef.current = performance.now();
           await audio.play().catch(() => {});
           setPlaying(true);
         },
@@ -287,7 +337,21 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           setPlaying(false);
         },
         seek: (t) => {
-          localTimeRef.current = t;
+          const audio = audioRef.current;
+          const clamped = Math.max(0, Math.min(t, duration));
+          if (!audio || !segments.length) {
+            localTimeRef.current = clamped;
+            return;
+          }
+          let idx = segments.findIndex(
+            (sg) => clamped >= sg.start && clamped < sg.start + sg.duration,
+          );
+          if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
+          const seg = segments[idx];
+          currentSegIdxRef.current = idx;
+          if (audio.src !== seg.url) audio.src = seg.url;
+          audio.currentTime = (clamped - seg.start) * settings.audioSpeed;
+          localTimeRef.current = clamped;
         },
         getDuration: () => duration,
         getCanvas: () => canvasRef.current,
@@ -315,17 +379,102 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
             Loading recitation…
           </div>
         )}
+        {ready && segments.length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/60 p-4 text-center text-sm text-muted-foreground">
+            No audio available for this selection — try another reciter.
+          </div>
+        )}
       </div>
     );
   },
 );
 
+function drawGeneratedBg(
+  ctx: CanvasRenderingContext2D,
+  g: GeneratedTheme,
+  w: number,
+  h: number,
+  t: number,
+) {
+  switch (g.type) {
+    case "solid": {
+      ctx.fillStyle = g.color;
+      ctx.fillRect(0, 0, w, h);
+      break;
+    }
+    case "gradient": {
+      const gr = ctx.createLinearGradient(0, 0, w, h);
+      gr.addColorStop(0, g.from);
+      gr.addColorStop(1, g.to);
+      ctx.fillStyle = gr;
+      ctx.fillRect(0, 0, w, h);
+      break;
+    }
+    case "particles": {
+      ctx.fillStyle = g.bg;
+      ctx.fillRect(0, 0, w, h);
+      for (let i = 0; i < 70; i++) {
+        const x = (i * 137 + t * 20) % w;
+        const y = (i * 91 + t * 10) % h;
+        const r = (g.size ?? 1) + (i % 4);
+        ctx.globalAlpha = 0.25 + (i % 5) * 0.1;
+        ctx.fillStyle = g.color;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      break;
+    }
+    case "bokeh": {
+      ctx.fillStyle = g.bg;
+      ctx.fillRect(0, 0, w, h);
+      for (let i = 0; i < 18; i++) {
+        const x = (i * 251 + t * 12) % (w + 200) - 100;
+        const y = (i * 173 + t * 6) % h;
+        const r = w * (0.03 + (i % 5) * 0.015);
+        const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+        grad.addColorStop(0, `${g.color}55`);
+        grad.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      break;
+    }
+    case "pattern": {
+      ctx.fillStyle = g.bg;
+      ctx.fillRect(0, 0, w, h);
+      const cs = w / 6;
+      ctx.strokeStyle = g.fg;
+      ctx.lineWidth = Math.max(1, w * 0.0015);
+      ctx.globalAlpha = 0.18;
+      for (let ry = -1; ry <= Math.ceil(h / cs); ry++) {
+        for (let cx = -1; cx <= 6; cx++) {
+          const px = cx * cs + cs / 2;
+          const py = ry * cs + cs / 2;
+          ctx.save();
+          ctx.translate(px, py);
+          ctx.strokeRect(-cs * 0.32, -cs * 0.32, cs * 0.64, cs * 0.64);
+          ctx.rotate(Math.PI / 4);
+          ctx.strokeRect(-cs * 0.32, -cs * 0.32, cs * 0.64, cs * 0.64);
+          ctx.restore();
+        }
+      }
+      ctx.globalAlpha = 1;
+      break;
+    }
+  }
+}
+
 function drawText(
   ctx: CanvasRenderingContext2D,
   s: ProjectSettings,
   verses: Verse[],
-  segments: { verse_key: string; start: number; duration: number }[],
+  segments: Segment[],
   t: number,
+  segIdx: number,
   w: number,
   h: number,
 ) {
@@ -334,19 +483,16 @@ function drawText(
   );
   if (!selected.length) return;
 
-  // Determine active verse from time
-  const activeSeg = segments.find((sg) => t >= sg.start && t < sg.start + sg.duration);
-  const activeKey = activeSeg?.verse_key;
-
-  const arabic = selected
-    .filter((v) => !activeKey || v.verse_key === activeKey)
-    .map((v) => v.text_uthmani)
-    .join("  ");
-  const currentVerse = activeKey
-    ? selected.find((v) => v.verse_key === activeKey)
-    : selected[0];
+  // Exactly ONE verse is shown at a time — the one whose audio segment is
+  // active. Previous verses are never stacked or joined together.
+  const seg = segments.length
+    ? segments[Math.min(segIdx, segments.length - 1)]
+    : undefined;
+  const currentVerse =
+    (seg && selected.find((v) => v.verse_key === seg.verse_key)) ?? selected[0];
+  const arabic = currentVerse.text_uthmani;
   const translation =
-    currentVerse?.translations?.[0]?.text?.replace(/<[^>]*>/g, "") ?? "";
+    currentVerse.translations?.[0]?.text?.replace(/<[^>]*>/g, "") ?? "";
 
   // Layout
   const maxW = w * (s.maxWidthPct / 100);
@@ -355,17 +501,18 @@ function drawText(
   if (s.layout === "bottom-third") baseY = h * 0.72;
   if (s.layout === "split") baseY = h * 0.35;
 
-  // Fade animation
+  // Fade animation based on position inside the active segment
   let alpha = 1;
-  if (activeSeg) {
-    const inSeg = t - activeSeg.start;
+  if (seg) {
+    const inSeg = Math.max(0, t - seg.start);
     const speed = 0.4 / s.animationSpeed;
     alpha = Math.min(1, inSeg / speed);
-    if (activeSeg.duration - inSeg < speed) alpha = Math.max(0.2, (activeSeg.duration - inSeg) / speed);
+    if (seg.duration - inSeg < speed) alpha = Math.max(0.2, (seg.duration - inSeg) / speed);
   }
   ctx.globalAlpha = alpha;
 
-  // Arabic text
+  // Arabic text — auto-fit: shrink until it wraps to ≤ 4 lines and fits
+  // vertically inside the safe area (long ayahs like 2:282 stay on screen).
   const arabicFont = ARABIC_FONTS.find((f) => f.id === s.arabicFont)?.css ?? "'Amiri', serif";
   const sizeScale = w / 1080;
   ctx.textAlign = "center";
@@ -375,10 +522,19 @@ function drawText(
     ctx.shadowBlur = 12 * sizeScale;
     ctx.shadowOffsetY = 2;
   }
-  const arSize = s.arabicSize * sizeScale;
-  ctx.font = `700 ${arSize}px ${arabicFont}`;
-  const arLines = wrapText(ctx, arabic, maxW);
-  const arLineH = arSize * s.lineHeight;
+  let arSize = s.arabicSize * sizeScale;
+  const minSize = s.arabicSize * sizeScale * 0.35;
+  let arLines: string[] = [];
+  let arLineH = 0;
+  for (;;) {
+    ctx.font = `700 ${arSize}px ${arabicFont}`;
+    arLines = wrapText(ctx, arabic, maxW);
+    arLineH = arSize * s.lineHeight;
+    const lineOK = arLines.length <= 4 || arSize <= minSize;
+    const heightOK = arLines.length * arLineH <= h * 0.55 || arSize <= 14;
+    if (lineOK && heightOK) break;
+    arSize *= 0.92;
+  }
   const arTotalH = arLines.length * arLineH;
   let y = baseY - arTotalH / 2;
   arLines.forEach((line) => {
@@ -389,11 +545,12 @@ function drawText(
   // Translation
   if (s.layout !== "arabic-only" && translation && s.translationId) {
     ctx.shadowBlur = 8 * sizeScale;
-    ctx.font = `500 ${arSize * 0.42}px Inter, sans-serif`;
+    const trSize = Math.max(arSize * 0.42, 14);
+    ctx.font = `500 ${trSize}px Inter, sans-serif`;
     ctx.fillStyle = s.textColor;
     const trY = s.layout === "split" ? h * 0.7 : y + arLineH * 0.4;
     const trLines = wrapText(ctx, translation, maxW);
-    const trLineH = arSize * 0.42 * 1.4;
+    const trLineH = trSize * 1.4;
     let ty = trY;
     trLines.forEach((line) => {
       ctx.fillText(line, centerX, ty);
@@ -402,12 +559,10 @@ function drawText(
   }
 
   // Reference
-  ctx.font = `600 ${arSize * 0.28}px Inter, sans-serif`;
+  ctx.font = `600 ${Math.max(arSize * 0.28, 14)}px Inter, sans-serif`;
   ctx.fillStyle = "#C9A227";
-  const chapterName = RECITERS.length ? "" : ""; // placeholder to avoid warning
-  void chapterName;
-  const ref = currentVerse?.verse_key ?? "";
-  if (ref) ctx.fillText(`— ${ref} —`, centerX, h * 0.88);
+  const refKey = currentVerse.verse_key ?? "";
+  if (refKey) ctx.fillText(`— ${refKey} —`, centerX, h * 0.88);
 
   ctx.shadowBlur = 0;
   ctx.globalAlpha = 1;

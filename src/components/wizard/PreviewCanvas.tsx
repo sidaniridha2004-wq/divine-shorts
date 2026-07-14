@@ -453,7 +453,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         getAudioDestination: () => _audioDest,
         getSegmentTimings: () => segments,
       }),
-      [segments, duration, settings.audioSpeed, playing, playSegment],
+      [segments, duration, settings.audioSpeed, playing],
     );
 
     const { w, h } = getDims(settings);

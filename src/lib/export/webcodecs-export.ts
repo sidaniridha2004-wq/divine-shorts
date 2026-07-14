@@ -8,40 +8,88 @@ export type ExportProgress = {
   message?: string;
 };
 
-async function fetchArrayBuffer(url: string): Promise<ArrayBuffer> {
+async function fetchAudioRange(url: string, startSec: number, endSec: number, totalDuration: number): Promise<{ buffer: ArrayBuffer, actualStartSec: number }> {
+  try {
+    // 1. Fetch first 10 bytes to read ID3v2 header size
+    const headRes = await fetch(url, { headers: { Range: "bytes=0-9" } });
+    if (!headRes.ok) throw new Error("Range not supported");
+    
+    const headBuf = await headRes.arrayBuffer();
+    const view = new Uint8Array(headBuf);
+    let id3Size = 0;
+    if (view.length >= 10 && view[0] === 0x49 && view[1] === 0x44 && view[2] === 0x33) {
+      id3Size = (view[6] << 21) | (view[7] << 14) | (view[8] << 7) | view[9];
+      id3Size += 10;
+    }
+
+    // 2. Fetch full file size
+    const fullHead = await fetch(url, { method: "HEAD" });
+    const contentLength = Number(fullHead.headers.get("Content-Length"));
+    
+    if (contentLength && contentLength > 0 && totalDuration > 0) {
+      const audioBytes = contentLength - id3Size;
+      const bytesPerSec = audioBytes / totalDuration;
+      
+      // generous padding to account for CBR inaccuracies
+      const pad = 15; 
+      const fetchStartSec = Math.max(0, startSec - pad);
+      const fetchEndSec = Math.min(totalDuration, endSec + pad);
+      
+      const startByte = id3Size + Math.floor(fetchStartSec * bytesPerSec);
+      const endByte = Math.min(contentLength - 1, id3Size + Math.ceil(fetchEndSec * bytesPerSec));
+      
+      const res = await fetch(url, {
+        headers: { Range: `bytes=${startByte}-${endByte}` }
+      });
+      
+      if (res.status === 206) {
+        return {
+          buffer: await res.arrayBuffer(),
+          actualStartSec: fetchStartSec
+        };
+      }
+    }
+  } catch (e) {
+    console.warn("Range request failed, falling back to full fetch", e);
+  }
+
+  // Fallback to full fetch
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch audio: ${url}`);
-  return await res.arrayBuffer();
+  return { buffer: await res.arrayBuffer(), actualStartSec: 0 };
 }
-
 async function mixAudio(
   reciterUrl: string,
-  reciterOffset: number,
-  duration: number,
+  startSec: number,
+  endSec: number,
+  totalDuration: number,
   audioSpeed: number,
   ambientUrl?: string,
 ): Promise<AudioBuffer> {
-  // We need to render `duration` seconds of audio.
-  // Because duration is *audio time* (scaled by audioSpeed for real time),
-  // the final buffer should be duration / audioSpeed seconds long!
+  const duration = endSec - startSec;
   const realDuration = duration / audioSpeed;
   const sampleRate = 44100;
   
   const ctx = new OfflineAudioContext(2, Math.ceil(sampleRate * realDuration), sampleRate);
 
-  const recBuf = await ctx.decodeAudioData(await fetchArrayBuffer(reciterUrl));
+  const { buffer, actualStartSec } = await fetchAudioRange(reciterUrl, startSec, endSec, totalDuration);
+  const recBuf = await ctx.decodeAudioData(buffer);
+  
   const recNode = ctx.createBufferSource();
   recNode.buffer = recBuf;
   recNode.playbackRate.value = audioSpeed;
   recNode.connect(ctx.destination);
   
   // start(when, offset)
-  // We start immediately (0) and offset into the MP3 by reciterOffset.
-  recNode.start(0, reciterOffset);
+  // The decoded buffer starts at `actualStartSec`.
+  // We want to extract audio starting from `startSec`.
+  const offsetInBuffer = startSec - actualStartSec;
+  recNode.start(0, Math.max(0, offsetInBuffer));
 
   if (ambientUrl) {
     try {
-      const ambBuf = await ctx.decodeAudioData(await fetchArrayBuffer(ambientUrl));
+      const ambRes = await fetch(ambientUrl);
+      const ambBuf = await ctx.decodeAudioData(await ambRes.arrayBuffer());
       const ambNode = ctx.createBufferSource();
       ambNode.buffer = ambBuf;
       ambNode.loop = true;
@@ -78,7 +126,8 @@ export async function exportVideo(
   const mixedAudio = await mixAudio(
     reciterEl.src,
     segments[0].absoluteStart,
-    duration,
+    segments[segments.length - 1].absoluteEnd,
+    reciterEl.duration,
     audioSpeed,
     ambientEl?.src
   );

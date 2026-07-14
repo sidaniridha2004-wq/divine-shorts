@@ -95,7 +95,7 @@ export function Step4Style() {
           placeholder="Search backgrounds…"
           className="mb-3"
         />
-        <div className="grid max-h-[420px] grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           {shown.map((t) => {
             const active = settings.themeId === t.id && !settings.customBg;
             const hovering = hoverId === t.id;

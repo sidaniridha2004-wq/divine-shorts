@@ -93,7 +93,10 @@ export function Step2Reciter() {
           const [, v] = s.verse_key.split(":").map(Number);
           return v === settings.fromAyah;
         }) ?? segs[0];
-      if (!audioRef.current) audioRef.current = new Audio();
+      if (!audioRef.current) {
+        audioRef.current = new Audio();
+        audioRef.current.crossOrigin = "anonymous";
+      }
       audioRef.current.src = first.url;
       audioRef.current.onended = () => setPreviewingId(null);
       await audioRef.current.play();

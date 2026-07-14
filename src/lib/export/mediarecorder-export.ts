@@ -17,14 +17,50 @@ const MIME_CANDIDATES = [
   { mime: "video/webm", ext: "webm" },
 ];
 
+let globalAudioCtx: AudioContext | null = null;
+let globalDest: MediaStreamAudioDestinationNode | null = null;
+const connectedSources = new WeakSet<HTMLAudioElement>();
+
+function getMixer() {
+  if (!globalAudioCtx) {
+    globalAudioCtx = new AudioContext();
+    globalDest = globalAudioCtx.createMediaStreamDestination();
+  }
+  return { ctx: globalAudioCtx, dest: globalDest! };
+}
+
+function connectToMixer(el: HTMLAudioElement) {
+  const { ctx, dest } = getMixer();
+  if (!connectedSources.has(el)) {
+    connectedSources.add(el);
+    try {
+      const source = ctx.createMediaElementSource(el);
+      source.connect(dest);
+      source.connect(ctx.destination);
+    } catch (e) {
+      console.warn("Failed to connect audio element to mixer", e);
+    }
+  }
+  // Ensure the context is running
+  if (ctx.state === "suspended") {
+    ctx.resume().catch(() => {});
+  }
+}
+
 export async function exportVideo(
   preview: PreviewHandle,
   onProgress: (p: ExportProgress) => void,
 ): Promise<{ blob: Blob; ext: string; mime: string }> {
   const canvas = preview.getCanvas();
-  const audioEl = preview.getAudioElement();
+  const audioEls = preview.getAudioElements ? preview.getAudioElements() : [];
+  // Fallback for older code
+  if (audioEls.length === 0 && preview.getAudioElement) {
+    const a = preview.getAudioElement();
+    if (a) audioEls.push(a);
+  }
   const segments = preview.getSegmentTimings();
-  if (!canvas || !audioEl || !segments.length)
+  
+  if (!canvas || !audioEls.length || !segments.length)
     throw new Error("Preview not ready");
 
   onProgress({ phase: "preparing", progress: 0.05, message: "Preparing streams…" });
@@ -33,13 +69,10 @@ export async function exportVideo(
   if (!chosen) throw new Error("No supported video codec in this browser");
 
   const canvasStream = canvas.captureStream(30);
-  const audioCtx = new AudioContext();
-  const dest = audioCtx.createMediaStreamDestination();
-
-  // Route the audio element through the context
-  const source = audioCtx.createMediaElementSource(audioEl);
-  source.connect(dest);
-  source.connect(audioCtx.destination); // also audible
+  
+  // Route all audio elements through the persistent context
+  audioEls.forEach(connectToMixer);
+  const { dest } = getMixer();
 
   const combined = new MediaStream([
     ...canvasStream.getVideoTracks(),
@@ -81,7 +114,6 @@ export async function exportVideo(
   recorder.stop();
   preview.pause();
   const blob = await donePromise;
-  audioCtx.close().catch(() => {});
   onProgress({ phase: "done", progress: 1 });
   return { blob, ext: chosen.ext, mime: chosen.mime };
 }

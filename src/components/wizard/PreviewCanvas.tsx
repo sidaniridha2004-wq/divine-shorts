@@ -10,6 +10,7 @@ import { useProjectState, type ProjectSettings } from "@/lib/project-state";
 import { THEMES, type GeneratedTheme } from "@/lib/themes";
 import { ARABIC_FONTS } from "@/lib/translations";
 import { getAyahAudioSegments, getVersesByChapter, type Verse } from "@/lib/quran-api";
+import { AMBIENT_TRACKS } from "@/lib/reciters";
 
 export type PreviewHandle = {
   play: () => Promise<void>;
@@ -18,6 +19,7 @@ export type PreviewHandle = {
   getDuration: () => number;
   getCanvas: () => HTMLCanvasElement | null;
   getAudioElement: () => HTMLAudioElement | null;
+  getAudioElements: () => HTMLAudioElement[];
   getSegmentTimings: () => { verse_key: string; start: number; duration: number }[];
 };
 
@@ -42,6 +44,7 @@ function getDims(s: ProjectSettings) {
 function probeDuration(url: string): Promise<number | null> {
   return new Promise((resolve) => {
     const a = new Audio();
+    a.crossOrigin = "anonymous";
     let settled = false;
     const done = (v: number | null) => {
       if (settled) return;
@@ -64,7 +67,10 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
     const { settings } = useProjectState();
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const videoRef = useRef<HTMLVideoElement | null>(null);
-    const audioRef = useRef<HTMLAudioElement>(null);
+    const audioRefA = useRef<HTMLAudioElement>(null);
+    const audioRefB = useRef<HTMLAudioElement>(null);
+    const ambientRef = useRef<HTMLAudioElement>(null);
+    const activeAudioRef = useRef<'A' | 'B'>('A');
     const rafRef = useRef<number | null>(null);
     const [verses, setVerses] = useState<Verse[]>([]);
     const [segments, setSegments] = useState<Segment[]>([]);
@@ -188,6 +194,24 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       }
     }, [settings.themeId, settings.customBg]);
 
+    // Ambient track logic
+    useEffect(() => {
+      const amb = ambientRef.current;
+      if (!amb) return;
+      const track = AMBIENT_TRACKS.find(t => t.id === settings.ambientId);
+      if (track) {
+        if (amb.src !== track.url) {
+           amb.src = track.url;
+           amb.load();
+           if (playing) amb.play().catch(() => {});
+        }
+        amb.volume = settings.ambientVolume;
+      } else {
+        amb.pause();
+        amb.src = "";
+      }
+    }, [settings.ambientId, settings.ambientVolume, playing]);
+
 
     const draw = useCallback(
       (t: number, segIdx: number) => {
@@ -207,7 +231,8 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         const v = videoRef.current as HTMLVideoElement | HTMLImageElement | null;
         const vw = ((v as any)?.videoWidth ?? (v as HTMLImageElement)?.naturalWidth ?? 0) as number;
         const vh = ((v as any)?.videoHeight ?? (v as HTMLImageElement)?.naturalHeight ?? 0) as number;
-        const videoReady = !!v && vw > 0 && vh > 0;
+        const isVideo = v && 'readyState' in v;
+        const videoReady = !!v && vw > 0 && vh > 0 && (!isVideo || (v as HTMLVideoElement).readyState >= 2);
         const wantsVideo = !!settings.customBg || !!theme?.video;
         if (wantsVideo && videoReady) {
           try {
@@ -287,7 +312,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
     // (audio.currentTime alone resets per segment — the source of the old bug).
     useEffect(() => {
       const loop = () => {
-        const audio = audioRef.current;
+        const audio = activeAudioRef.current === 'A' ? audioRefA.current : audioRefB.current;
         let t = localTimeRef.current;
         const idx = currentSegIdxRef.current;
         const seg = segments[idx];
@@ -306,55 +331,47 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       };
     }, [draw, playing, duration, onProgress, segments, settings.audioSpeed]);
 
-    // Seamless ayah transitions: preload the next segment while the current
-    // one is still playing, then swap on 'ended' with zero re-buffering.
-    // A hidden warm-up audio element preloads next.url; on 'ended' we simply
-    // point the main <audio> at that URL — the browser already has it buffered.
+    // Seamless ayah transitions: use two alternating audio elements (A and B).
+    // While one plays, the other preloads the next ayah. On 'ended', they swap instantly.
     useEffect(() => {
-      const audio = audioRef.current;
-      if (!audio) return;
-      const preloader = new Audio();
-      preloader.preload = "auto";
-      preloader.crossOrigin = "anonymous";
+      const a = audioRefA.current;
+      const b = audioRefB.current;
+      if (!a || !b) return;
 
-      const preloadNext = () => {
-        const nextIdx = currentSegIdxRef.current + 1;
-        const next = segments[nextIdx];
-        if (next && preloader.src !== next.url) {
-          preloader.src = next.url;
-          try {
-            preloader.load();
-          } catch {}
-        }
-      };
-
-      const onLoaded = () => preloadNext();
       const onEnded = () => {
         const nextIdx = currentSegIdxRef.current + 1;
         if (nextIdx < segments.length) {
           currentSegIdxRef.current = nextIdx;
           const next = segments[nextIdx];
           localTimeRef.current = next.start;
-          audio.src = next.url;
-          audio.playbackRate = settings.audioSpeed;
-          // Start immediately — the preloader has already buffered this URL
-          audio.play().catch(() => {});
-          // Warm up the ayah after that
-          setTimeout(preloadNext, 0);
+          
+          // Switch active audio to the one that has been preloading
+          const active = activeAudioRef.current === 'A' ? b : a;
+          activeAudioRef.current = activeAudioRef.current === 'A' ? 'B' : 'A';
+          
+          active.playbackRate = settings.audioSpeed;
+          active.play().catch(() => {});
+          
+          // Preload the next-next segment on the newly idle element
+          const idle = active === a ? b : a;
+          const nextNext = segments[nextIdx + 1];
+          if (nextNext) {
+            idle.src = nextNext.url;
+            idle.load();
+          }
         } else {
           setPlaying(false);
           currentSegIdxRef.current = 0;
           localTimeRef.current = 0;
+          ambientRef.current?.pause();
         }
       };
-      audio.addEventListener("loadeddata", onLoaded);
-      audio.addEventListener("ended", onEnded);
-      // Prime once so the second ayah is already buffered by the time the first ends
-      preloadNext();
+      a.addEventListener("ended", onEnded);
+      b.addEventListener("ended", onEnded);
+      
       return () => {
-        audio.removeEventListener("loadeddata", onLoaded);
-        audio.removeEventListener("ended", onEnded);
-        preloader.src = "";
+        a.removeEventListener("ended", onEnded);
+        b.removeEventListener("ended", onEnded);
       };
     }, [segments, settings.audioSpeed]);
 
@@ -363,7 +380,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       ref,
       () => ({
         play: async () => {
-          const audio = audioRef.current;
+          const audio = activeAudioRef.current === 'A' ? audioRefA.current : audioRefB.current;
           if (!audio || !segments.length) return;
           const t = localTimeRef.current;
           const resuming = !!audio.src && t > 0.05 && t < duration - 0.05;
@@ -372,19 +389,28 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
             localTimeRef.current = 0;
             audio.src = segments[0].url;
             audio.currentTime = 0;
+            
+            // Preload B with segment 1
+            const other = activeAudioRef.current === 'A' ? audioRefB.current : audioRefA.current;
+            if (other && segments.length > 1) {
+              other.src = segments[1].url;
+              other.load();
+            }
           }
           audio.playbackRate = settings.audioSpeed;
+          ambientRef.current?.play().catch(() => {});
           await audio.play().catch(() => {});
           setPlaying(true);
         },
         pause: () => {
-          audioRef.current?.pause();
+          audioRefA.current?.pause();
+          audioRefB.current?.pause();
+          ambientRef.current?.pause();
           setPlaying(false);
         },
         seek: (t) => {
-          const audio = audioRef.current;
           const clamped = Math.max(0, Math.min(t, duration));
-          if (!audio || !segments.length) {
+          if (!segments.length) {
             localTimeRef.current = clamped;
             return;
           }
@@ -394,13 +420,24 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
           const seg = segments[idx];
           currentSegIdxRef.current = idx;
+          
+          const audio = activeAudioRef.current === 'A' ? audioRefA.current : audioRefB.current;
+          if (!audio) return;
           if (audio.src !== seg.url) audio.src = seg.url;
           audio.currentTime = (clamped - seg.start) * settings.audioSpeed;
           localTimeRef.current = clamped;
+          
+          const other = activeAudioRef.current === 'A' ? audioRefB.current : audioRefA.current;
+          const nextSeg = segments[idx + 1];
+          if (other && nextSeg && other.src !== nextSeg.url) {
+            other.src = nextSeg.url;
+            other.load();
+          }
         },
         getDuration: () => duration,
         getCanvas: () => canvasRef.current,
-        getAudioElement: () => audioRef.current,
+        getAudioElement: () => activeAudioRef.current === 'A' ? audioRefA.current : audioRefB.current,
+        getAudioElements: () => [audioRefA.current, audioRefB.current, ambientRef.current].filter(Boolean) as HTMLAudioElement[],
         getSegmentTimings: () => segments,
       }),
       [segments, duration, settings.audioSpeed],
@@ -418,7 +455,9 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           style={{ maxHeight: "70vh" }}
           aria-label="Video preview"
         />
-        <audio ref={audioRef} crossOrigin="anonymous" preload="auto" />
+        <audio ref={audioRefA} crossOrigin="anonymous" preload="auto" />
+        <audio ref={audioRefB} crossOrigin="anonymous" preload="auto" />
+        <audio ref={ambientRef} crossOrigin="anonymous" preload="auto" loop />
         {!ready && (
           <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/60 text-sm text-muted-foreground">
             Loading recitation…

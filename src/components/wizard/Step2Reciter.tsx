@@ -2,14 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   RECITERS,
   AMBIENT_TRACKS,
-  ARABIC_NAMES,
-  RECITER_ACCENTS,
   EVERYAYAH_RECITERS,
-  initialsOf,
   type Reciter,
 } from "@/lib/reciters";
 import { useProjectState } from "@/lib/project-state";
-import { getAyahAudioSegments, getRecitations } from "@/lib/quran-api";
+import { getAyahAudioSegments, EVERYAYAH_FOLDERS } from "@/lib/quran-api";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
@@ -39,31 +36,14 @@ export function Step2Reciter() {
   const [loadingId, setLoadingId] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Fetch the full reciter catalog from Quran.com; fall back to the curated list.
+  // Only show reciters we can actually stream audio for.
+  // Everyayah-served reciters (including Yasser Al-Dossary) all work per-ayah.
+  // Quran.com reciters are included only if we have a verified everyayah fallback folder.
   useEffect(() => {
-    getRecitations()
-      .then((list) => {
-        const fromApi: Reciter[] = list.length
-          ? list.map((r, i) => {
-              const name = r.translated_name?.name || r.reciter_name;
-              return {
-                id: r.id,
-                name,
-                arabic: ARABIC_NAMES[r.id] ?? "",
-                style: r.style || "Murattal",
-                accent: RECITER_ACCENTS[i % RECITER_ACCENTS.length],
-                initials: initialsOf(name),
-              };
-            })
-          : RECITERS;
-        // Merge in extra reciters served via everyayah.com (e.g. Yasser Al-Dossary),
-        // pinned to the top so users can find them easily. Skip duplicates by id.
-        const seen = new Set(fromApi.map((r) => r.id));
-        const extras = EVERYAYAH_RECITERS.filter((r) => !seen.has(r.id));
-        setReciters([...extras, ...fromApi]);
-      })
-      .catch(() => setReciters([...EVERYAYAH_RECITERS, ...RECITERS]));
+    const verifiedQuranCom = RECITERS.filter((r) => EVERYAYAH_FOLDERS[r.id]);
+    setReciters([...EVERYAYAH_RECITERS, ...verifiedQuranCom]);
   }, []);
+
 
   // Stop preview audio when leaving this step
   useEffect(() => () => audioRef.current?.pause(), []);

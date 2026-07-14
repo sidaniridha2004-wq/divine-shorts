@@ -141,38 +141,53 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       };
     }, [settings.reciterId, settings.chapterId, settings.fromAyah, settings.toAyah, settings.audioSpeed]);
 
-    // Load background video
+    // Load background. We prefer the theme's poster image (Pexels image CDN
+    // sends CORS headers so it renders on the canvas). Then we try to upgrade
+    // to the looping video in the background — if it loads successfully with
+    // CORS, we swap it in; if not (Pexels video CDN often doesn't return
+    // CORS), we keep the image. Custom user uploads work as before.
     useEffect(() => {
       const theme = THEMES.find((t) => t.id === settings.themeId);
-      if (settings.customBg) {
-        if (settings.customBg.startsWith("data:video") || /\.(mp4|webm|mov)/i.test(settings.customBg)) {
-          const v = document.createElement("video");
-          v.src = settings.customBg;
-          v.crossOrigin = "anonymous";
-          v.muted = true;
-          v.loop = true;
-          v.playsInline = true;
-          videoRef.current = v;
-          v.play().catch(() => {});
-        } else {
-          const img = new Image();
-          img.crossOrigin = "anonymous";
-          img.src = settings.customBg;
-          (videoRef as any).current = img;
-        }
-      } else if (theme?.video) {
+      videoRef.current = null;
+
+      const loadImage = (src: string) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => {
+          // Only assign if still relevant (theme didn't change mid-load)
+          if (!videoRef.current || !(videoRef.current instanceof HTMLVideoElement)) {
+            (videoRef as any).current = img;
+          }
+        };
+        img.src = src;
+      };
+
+      const loadVideo = (src: string) => {
         const v = document.createElement("video");
-        v.src = theme.video;
         v.crossOrigin = "anonymous";
         v.muted = true;
         v.loop = true;
         v.playsInline = true;
-        videoRef.current = v;
-        v.play().catch(() => {});
-      } else {
-        videoRef.current = null;
+        v.onloadeddata = () => {
+          videoRef.current = v;
+          v.play().catch(() => {});
+        };
+        v.onerror = () => {}; // silently keep the image
+        v.src = src;
+      };
+
+      if (settings.customBg) {
+        if (settings.customBg.startsWith("data:video") || /\.(mp4|webm|mov)/i.test(settings.customBg)) {
+          loadVideo(settings.customBg);
+        } else {
+          loadImage(settings.customBg);
+        }
+      } else if (theme?.poster) {
+        loadImage(theme.poster);
+        if (theme.video) loadVideo(theme.video);
       }
     }, [settings.themeId, settings.customBg]);
+
 
     const draw = useCallback(
       (t: number, segIdx: number) => {
@@ -291,10 +306,29 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       };
     }, [draw, playing, duration, onProgress, segments, settings.audioSpeed]);
 
-    // Sequence audio segments strictly via the 'ended' event
+    // Seamless ayah transitions: preload the next segment while the current
+    // one is still playing, then swap on 'ended' with zero re-buffering.
+    // A hidden warm-up audio element preloads next.url; on 'ended' we simply
+    // point the main <audio> at that URL — the browser already has it buffered.
     useEffect(() => {
       const audio = audioRef.current;
       if (!audio) return;
+      const preloader = new Audio();
+      preloader.preload = "auto";
+      preloader.crossOrigin = "anonymous";
+
+      const preloadNext = () => {
+        const nextIdx = currentSegIdxRef.current + 1;
+        const next = segments[nextIdx];
+        if (next && preloader.src !== next.url) {
+          preloader.src = next.url;
+          try {
+            preloader.load();
+          } catch {}
+        }
+      };
+
+      const onLoaded = () => preloadNext();
       const onEnded = () => {
         const nextIdx = currentSegIdxRef.current + 1;
         if (nextIdx < segments.length) {
@@ -303,17 +337,27 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           localTimeRef.current = next.start;
           audio.src = next.url;
           audio.playbackRate = settings.audioSpeed;
+          // Start immediately — the preloader has already buffered this URL
           audio.play().catch(() => {});
+          // Warm up the ayah after that
+          setTimeout(preloadNext, 0);
         } else {
-          // Finished: clean reset so the next play starts from the beginning
           setPlaying(false);
           currentSegIdxRef.current = 0;
           localTimeRef.current = 0;
         }
       };
+      audio.addEventListener("loadeddata", onLoaded);
       audio.addEventListener("ended", onEnded);
-      return () => audio.removeEventListener("ended", onEnded);
+      // Prime once so the second ayah is already buffered by the time the first ends
+      preloadNext();
+      return () => {
+        audio.removeEventListener("loadeddata", onLoaded);
+        audio.removeEventListener("ended", onEnded);
+        preloader.src = "";
+      };
     }, [segments, settings.audioSpeed]);
+
 
     useImperativeHandle(
       ref,

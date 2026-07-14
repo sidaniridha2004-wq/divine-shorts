@@ -90,22 +90,73 @@ export async function getChapterAudio(
   }
 }
 
+// Every-Ayah CDN folders — used both as a fallback when Quran.com returns
+// no verse-by-verse audio, AND to expose reciters (like Yasser Al-Dossary)
+// that are otherwise unavailable via the Quran.com API.
+export const EVERYAYAH_FOLDERS: Record<number, string> = {
+  // Custom high ids reserved for app-only reciters (not in Quran.com list)
+  9001: "Yasser_Ad-Dussary_128kbps",
+  9002: "Nasser_Alqatami_128kbps",
+  9003: "Maher_AlMuaiqly_64kbps",
+  9004: "Ahmed_ibn_Ali_al-Ajamy_128kbps",
+  9005: "Salah_AlBudair_128kbps",
+  // Known Quran.com reciter ids → matching everyayah folder (fallback)
+  1: "Abdul_Basit_Mujawwad_128kbps",
+  2: "Abdul_Basit_Murattal_192kbps",
+  3: "Abdurrahmaan_As-Sudais_192kbps",
+  4: "Abu_Bakr_Ash-Shaatree_128kbps",
+  5: "Hani_Rifai_192kbps",
+  6: "Husary_128kbps",
+  7: "Alafasy_128kbps",
+  8: "Minshawy_Mujawwad_192kbps",
+  9: "Minshawy_Murattal_128kbps",
+  10: "Saood_ash-Shuraym_128kbps",
+  12: "Husary_Muallim_128kbps",
+};
+
+function pad3(n: number) {
+  return String(n).padStart(3, "0");
+}
+
+async function everyayahSegments(
+  folder: string,
+  chapterId: number,
+): Promise<{ verse_key: string; url: string; duration?: number }[]> {
+  const chapters = await getChapters().catch(() => [] as Chapter[]);
+  const ch = chapters.find((c) => c.id === chapterId);
+  const count = ch?.verses_count ?? 7;
+  return Array.from({ length: count }, (_, i) => {
+    const v = i + 1;
+    return {
+      verse_key: `${chapterId}:${v}`,
+      url: `https://everyayah.com/data/${folder}/${pad3(chapterId)}${pad3(v)}.mp3`,
+    };
+  });
+}
+
 // Per-ayah audio (with timing) from verse recitations
 export async function getAyahAudioSegments(
   recitationId: number,
   chapterId: number,
 ): Promise<{ verse_key: string; url: string; duration?: number }[]> {
+  const folder = EVERYAYAH_FOLDERS[recitationId];
+  // App-only ids (>=9000) skip Quran.com entirely.
+  if (folder && recitationId >= 9000) return everyayahSegments(folder, chapterId);
   try {
     const data = await fetchJson<{
       audio_files: { verse_key: string; url: string; duration?: number }[];
     }>(`/recitations/${recitationId}/by_chapter/${chapterId}`);
-    return data.audio_files.map((a) => ({
-      ...a,
-      url: a.url.startsWith("http") ? a.url : `https://verses.quran.com/${a.url}`,
-    }));
-  } catch {
-    return [];
-  }
+    const files = data.audio_files ?? [];
+    if (files.length) {
+      return files.map((a) => ({
+        ...a,
+        url: a.url.startsWith("http") ? a.url : `https://verses.quran.com/${a.url}`,
+      }));
+    }
+  } catch {}
+  // Fallback to everyayah if we know a matching folder for this reciter.
+  if (folder) return everyayahSegments(folder, chapterId);
+  return [];
 }
 
 export type RecitationResource = {

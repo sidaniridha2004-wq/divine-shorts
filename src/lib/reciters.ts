@@ -41,6 +41,14 @@ export const ARABIC_NAMES: Record<number, string> = {
   9003: "ماهر المعيقلي",
   9004: "أحمد بن علي العجمي",
   9005: "صلاح البدير",
+  9006: "سعد الغامدي",
+  9007: "محمد جبريل",
+  9008: "محمد أيوب",
+  9009: "عبد الله بصفر",
+  9010: "خليفة الطنيجي",
+  9011: "فارس عباد",
+  9012: "علي جابر",
+  9013: "محمد الطبلاوي",
 };
 
 // App-only reciters served via the everyayah.com CDN. These are always
@@ -52,6 +60,14 @@ export const EVERYAYAH_RECITERS: Reciter[] = [
   { id: 9002, name: "Nasser Al-Qatami", arabic: "ناصر القطامي", style: "Murattal", accent: RECITER_ACCENTS[3], initials: "NQ" },
   { id: 9005, name: "Salah Al-Budair", arabic: "صلاح البدير", style: "Murattal", accent: RECITER_ACCENTS[4], initials: "SB" },
   { id: 9004, name: "Ahmed Al-Ajamy", arabic: "أحمد بن علي العجمي", style: "Murattal", accent: RECITER_ACCENTS[5], initials: "AA" },
+  { id: 9006, name: "Saad Al-Ghamdi", arabic: "سعد الغامدي", style: "Murattal", accent: RECITER_ACCENTS[6], initials: "SG" },
+  { id: 9007, name: "Muhammad Jibreel", arabic: "محمد جبريل", style: "Murattal", accent: RECITER_ACCENTS[7], initials: "MJ" },
+  { id: 9008, name: "Muhammad Ayyoub", arabic: "محمد أيوب", style: "Murattal", accent: RECITER_ACCENTS[0], initials: "MA" },
+  { id: 9009, name: "Abdullah Basfar", arabic: "عبد الله بصفر", style: "Murattal", accent: RECITER_ACCENTS[1], initials: "AB" },
+  { id: 9010, name: "Khalifa Al-Tunaiji", arabic: "خليفة الطنيجي", style: "Murattal", accent: RECITER_ACCENTS[2], initials: "KT" },
+  { id: 9011, name: "Fares Abbad", arabic: "فارس عباد", style: "Murattal", accent: RECITER_ACCENTS[3], initials: "FA" },
+  { id: 9012, name: "Ali Jaber", arabic: "علي جابر", style: "Murattal", accent: RECITER_ACCENTS[4], initials: "AJ" },
+  { id: 9013, name: "Muhammad Al-Tablawi", arabic: "محمد الطبلاوي", style: "Murattal", accent: RECITER_ACCENTS[5], initials: "MT" },
 ];
 
 export function initialsOf(name: string): string {

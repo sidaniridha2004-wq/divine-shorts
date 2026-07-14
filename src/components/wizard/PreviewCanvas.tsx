@@ -20,6 +20,8 @@ export type PreviewHandle = {
   getCanvas: () => HTMLCanvasElement | null;
   getAudioElement: () => HTMLAudioElement | null;
   getAudioElements: () => HTMLAudioElement[];
+  getAudioContext: () => AudioContext | null;
+  getAudioDestination: () => MediaStreamAudioDestinationNode | null;
   getSegmentTimings: () => { verse_key: string; start: number; duration: number }[];
 };
 
@@ -38,9 +40,26 @@ function getDims(s: ProjectSettings) {
   return { w: Math.round(base.w * scale), h: Math.round(base.h * scale) };
 }
 
-// Read the real duration of an audio file from its metadata.
-// Accurate durations are essential: the text timeline must never drift
-// away from the audio (the old 5s estimate caused ayahs to get mixed up).
+// ── Singleton AudioContext ──────────────────────────────────────────────
+let _audioCtx: AudioContext | null = null;
+let _audioDest: MediaStreamAudioDestinationNode | null = null;
+let _masterGain: GainNode | null = null;
+
+function getAudioCtx(): AudioContext {
+  if (!_audioCtx) {
+    _audioCtx = new AudioContext();
+    _audioDest = _audioCtx.createMediaStreamDestination();
+    _masterGain = _audioCtx.createGain();
+    _masterGain.connect(_audioCtx.destination);
+    _masterGain.connect(_audioDest);
+  }
+  if (_audioCtx.state === "suspended") _audioCtx.resume().catch(() => {});
+  return _audioCtx;
+}
+function getAudioDest() { getAudioCtx(); return _audioDest!; }
+function getMasterGain() { getAudioCtx(); return _masterGain!; }
+
+// ── Duration probing (fallback) ─────────────────────────────────────────
 function probeDuration(url: string): Promise<number | null> {
   return new Promise((resolve) => {
     const a = new Audio();
@@ -62,15 +81,26 @@ function probeDuration(url: string): Promise<number | null> {
   });
 }
 
+// ── Ambient audio connection (one-time) ─────────────────────────────────
+const _connectedAmbient = new WeakSet<HTMLAudioElement>();
+function connectAmbientToCtx(el: HTMLAudioElement) {
+  if (_connectedAmbient.has(el)) return;
+  _connectedAmbient.add(el);
+  try {
+    const ctx = getAudioCtx();
+    const src = ctx.createMediaElementSource(el);
+    src.connect(getMasterGain());
+  } catch (e) {
+    console.warn("ambient connect failed", e);
+  }
+}
+
 export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number, d: number) => void }>(
   function PreviewCanvas({ onProgress }, ref) {
     const { settings } = useProjectState();
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const videoRef = useRef<HTMLVideoElement | null>(null);
-    const audioRefA = useRef<HTMLAudioElement>(null);
-    const audioRefB = useRef<HTMLAudioElement>(null);
     const ambientRef = useRef<HTMLAudioElement>(null);
-    const activeAudioRef = useRef<'A' | 'B'>('A');
     const rafRef = useRef<number | null>(null);
     const [verses, setVerses] = useState<Verse[]>([]);
     const [segments, setSegments] = useState<Segment[]>([]);
@@ -78,9 +108,13 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
     const [duration, setDuration] = useState(0);
     const [ready, setReady] = useState(false);
     const localTimeRef = useRef(0);
-    // Index of the segment (= ayah) currently playing. The active ayah is
-    // always derived from this index — never from wall-clock guesses.
     const currentSegIdxRef = useRef(0);
+
+    // AudioBuffer engine refs
+    const audioBuffersRef = useRef<(AudioBuffer | null)[]>([]);
+    const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
+    const playStartCtxTimeRef = useRef(0);   // ctx.currentTime when source.start() was called
+    const playStartOffsetRef = useRef(0);    // offset into the current buffer where playback began
 
     // Load verses when chapter or translation changes
     useEffect(() => {
@@ -106,6 +140,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       setReady(false);
       setSegments([]);
       setDuration(0);
+      audioBuffersRef.current = [];
       (async () => {
         const segs = await getAyahAudioSegments(settings.reciterId, settings.chapterId);
         const filtered = segs
@@ -113,7 +148,6 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
             const [, v] = s.verse_key.split(":").map(Number);
             return v >= settings.fromAyah && v <= settings.toAyah;
           })
-          // Guarantee playback order regardless of API ordering
           .sort(
             (a, b) =>
               Number(a.verse_key.split(":")[1]) - Number(b.verse_key.split(":")[1]),
@@ -123,7 +157,6 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         if (!alive) return;
         let t = 0;
         const withTiming: Segment[] = filtered.map((s, i) => {
-          // API duration is sometimes ms, sometimes seconds, often missing
           const api = s.duration ? (s.duration > 100 ? s.duration / 1000 : s.duration) : null;
           const raw = probed[i] ?? api ?? 5;
           const dur = raw / settings.audioSpeed;
@@ -147,11 +180,98 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       };
     }, [settings.reciterId, settings.chapterId, settings.fromAyah, settings.toAyah, settings.audioSpeed]);
 
-    // Load background. We prefer the theme's poster image (Pexels image CDN
-    // sends CORS headers so it renders on the canvas). Then we try to upgrade
-    // to the looping video in the background — if it loads successfully with
-    // CORS, we swap it in; if not (Pexels video CDN often doesn't return
-    // CORS), we keep the image. Custom user uploads work as before.
+    // Fetch & decode AudioBuffers when segments change
+    useEffect(() => {
+      if (!segments.length) return;
+      let alive = true;
+      const ctx = getAudioCtx();
+      (async () => {
+        const buffers = await Promise.all(
+          segments.map(async (seg) => {
+            try {
+              const res = await fetch(seg.url);
+              const ab = await res.arrayBuffer();
+              return await ctx.decodeAudioData(ab);
+            } catch (e) {
+              console.warn("Failed to decode audio:", seg.url, e);
+              return null;
+            }
+          }),
+        );
+        if (alive) {
+          audioBuffersRef.current = buffers;
+          // Update segment durations from decoded buffers (most accurate)
+          setSegments((prev) => {
+            let t = 0;
+            const updated = prev.map((s, i) => {
+              const buf = buffers[i];
+              const dur = buf ? buf.duration / settings.audioSpeed : s.duration;
+              const entry = { ...s, start: t, duration: dur };
+              t += dur;
+              return entry;
+            });
+            setDuration(t);
+            return updated;
+          });
+        }
+      })();
+      return () => { alive = false; };
+    }, [segments.length > 0 ? segments.map(s => s.url).join(",") : ""]);
+
+    // ── Play a specific segment using AudioBufferSourceNode ──────────────
+    const playSegment = useCallback((segIdx: number, offsetInBuffer: number = 0) => {
+      // Stop any currently playing source
+      if (currentSourceRef.current) {
+        try { currentSourceRef.current.onended = null; currentSourceRef.current.stop(); } catch {}
+        currentSourceRef.current = null;
+      }
+
+      const buffer = audioBuffersRef.current[segIdx];
+      if (!buffer) {
+        // No buffer available, advance to next segment
+        const nextIdx = segIdx + 1;
+        if (nextIdx < segments.length) {
+          currentSegIdxRef.current = nextIdx;
+          localTimeRef.current = segments[nextIdx].start;
+          playSegment(nextIdx, 0);
+        } else {
+          setPlaying(false);
+          currentSegIdxRef.current = 0;
+          localTimeRef.current = 0;
+          ambientRef.current?.pause();
+        }
+        return;
+      }
+
+      const ctx = getAudioCtx();
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.playbackRate.value = settings.audioSpeed;
+      source.connect(getMasterGain());
+      currentSourceRef.current = source;
+      playStartCtxTimeRef.current = ctx.currentTime;
+      playStartOffsetRef.current = offsetInBuffer;
+
+      source.onended = () => {
+        if (currentSourceRef.current !== source) return; // stale
+        const nextIdx = segIdx + 1;
+        if (nextIdx < segments.length) {
+          currentSegIdxRef.current = nextIdx;
+          localTimeRef.current = segments[nextIdx].start;
+          playSegment(nextIdx, 0);
+        } else {
+          setPlaying(false);
+          currentSegIdxRef.current = 0;
+          localTimeRef.current = 0;
+          currentSourceRef.current = null;
+          ambientRef.current?.pause();
+        }
+      };
+
+      source.start(0, offsetInBuffer);
+    }, [segments, settings.audioSpeed]);
+
+    // Load background
     useEffect(() => {
       const theme = THEMES.find((t) => t.id === settings.themeId);
       videoRef.current = null;
@@ -160,7 +280,6 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         const img = new Image();
         img.crossOrigin = "anonymous";
         img.onload = () => {
-          // Only assign if still relevant (theme didn't change mid-load)
           if (!videoRef.current || !(videoRef.current instanceof HTMLVideoElement)) {
             (videoRef as any).current = img;
           }
@@ -178,7 +297,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           videoRef.current = v;
           v.play().catch(() => {});
         };
-        v.onerror = () => {}; // silently keep the image
+        v.onerror = () => {};
         v.src = src;
       };
 
@@ -212,7 +331,6 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       }
     }, [settings.ambientId, settings.ambientVolume, playing]);
 
-
     const draw = useCallback(
       (t: number, segIdx: number) => {
         const canvas = canvasRef.current;
@@ -224,9 +342,6 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           canvas.width = w;
           canvas.height = h;
         }
-        // Background — prefer the theme's video/custom asset when it's
-        // actually loaded, otherwise fall back to the theme's generated
-        // gradient (so preview is never blank if a CDN asset is slow/blocked).
         const theme = THEMES.find((th) => th.id === settings.themeId);
         const v = videoRef.current as HTMLVideoElement | HTMLImageElement | null;
         const vw = ((v as any)?.videoWidth ?? (v as HTMLImageElement)?.naturalWidth ?? 0) as number;
@@ -254,12 +369,10 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           ctx.fillStyle = "#0B0F0E";
           ctx.fillRect(0, 0, w, h);
         }
-        // Overlay darkness
         if (settings.overlayDarkness > 0) {
           ctx.fillStyle = `rgba(0,0,0,${settings.overlayDarkness})`;
           ctx.fillRect(0, 0, w, h);
         }
-        // Vignette
         if (settings.vignette) {
           const grad = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.3, w / 2, h / 2, Math.max(w, h) * 0.7);
           grad.addColorStop(0, "rgba(0,0,0,0)");
@@ -267,21 +380,18 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           ctx.fillStyle = grad;
           ctx.fillRect(0, 0, w, h);
         }
-        // Grain
         if (settings.grain) {
           for (let i = 0; i < 400; i++) {
             ctx.fillStyle = `rgba(255,255,255,${Math.random() * 0.04})`;
             ctx.fillRect(Math.random() * w, Math.random() * h, 1, 1);
           }
         }
-        // Frame decorations
         if (settings.frame === "gold-thin") {
           ctx.strokeStyle = "#C9A227";
           ctx.lineWidth = Math.max(2, w * 0.006);
           const m = w * 0.03;
           ctx.strokeRect(m, m, w - m * 2, h - m * 2);
         }
-        // Watermark
         if (settings.watermark.type !== "none") {
           const label =
             settings.watermark.type === "logo" ? "QuranReels" : settings.watermark.text || "";
@@ -301,24 +411,22 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
             ctx.fillText(label, tx, ty);
           }
         }
-        // Text
         drawText(ctx, settings, verses, segments, t, segIdx, w, h);
       },
       [settings, verses, segments],
     );
 
-    // rAF render loop. Global time = start of the active segment + position
-    // inside it. This is monotonic and can never rewind to a previous ayah
-    // (audio.currentTime alone resets per segment — the source of the old bug).
+    // rAF render loop — time derived from AudioContext for perfect sync
     useEffect(() => {
       const loop = () => {
-        const audio = activeAudioRef.current === 'A' ? audioRefA.current : audioRefB.current;
         let t = localTimeRef.current;
         const idx = currentSegIdxRef.current;
         const seg = segments[idx];
-        if (playing && audio && seg) {
-          const inSeg = Math.min(audio.currentTime / settings.audioSpeed, seg.duration);
-          t = seg.start + inSeg;
+        if (playing && currentSourceRef.current && seg) {
+          const ctx = getAudioCtx();
+          const elapsed = (ctx.currentTime - playStartCtxTimeRef.current) * settings.audioSpeed;
+          const inSeg = playStartOffsetRef.current + elapsed;
+          t = seg.start + Math.min(inSeg / settings.audioSpeed, seg.duration);
         }
         localTimeRef.current = t;
         draw(t, idx);
@@ -331,80 +439,51 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       };
     }, [draw, playing, duration, onProgress, segments, settings.audioSpeed]);
 
-    // Seamless ayah transitions: use two alternating audio elements (A and B).
-    // While one plays, the other preloads the next ayah. On 'ended', they swap instantly.
-    useEffect(() => {
-      const a = audioRefA.current;
-      const b = audioRefB.current;
-      if (!a || !b) return;
-
-      const onEnded = () => {
-        const nextIdx = currentSegIdxRef.current + 1;
-        if (nextIdx < segments.length) {
-          currentSegIdxRef.current = nextIdx;
-          const next = segments[nextIdx];
-          localTimeRef.current = next.start;
-          
-          // Switch active audio to the one that has been preloading
-          const active = activeAudioRef.current === 'A' ? b : a;
-          activeAudioRef.current = activeAudioRef.current === 'A' ? 'B' : 'A';
-          
-          active.playbackRate = settings.audioSpeed;
-          active.play().catch(() => {});
-          
-          // Preload the next-next segment on the newly idle element
-          const idle = active === a ? b : a;
-          const nextNext = segments[nextIdx + 1];
-          if (nextNext) {
-            idle.src = nextNext.url;
-            idle.load();
-          }
-        } else {
-          setPlaying(false);
-          currentSegIdxRef.current = 0;
-          localTimeRef.current = 0;
-          ambientRef.current?.pause();
-        }
-      };
-      a.addEventListener("ended", onEnded);
-      b.addEventListener("ended", onEnded);
-      
-      return () => {
-        a.removeEventListener("ended", onEnded);
-        b.removeEventListener("ended", onEnded);
-      };
-    }, [segments, settings.audioSpeed]);
-
-
     useImperativeHandle(
       ref,
       () => ({
         play: async () => {
-          const audio = activeAudioRef.current === 'A' ? audioRefA.current : audioRefB.current;
-          if (!audio || !segments.length) return;
+          if (!segments.length) return;
+          const ctx = getAudioCtx();
+          if (ctx.state === "suspended") await ctx.resume();
+
+          // Connect ambient to AudioContext on first play
+          if (ambientRef.current) connectAmbientToCtx(ambientRef.current);
+
           const t = localTimeRef.current;
-          const resuming = !!audio.src && t > 0.05 && t < duration - 0.05;
+          const resuming = t > 0.05 && t < duration - 0.05;
           if (!resuming) {
             currentSegIdxRef.current = 0;
             localTimeRef.current = 0;
-            audio.src = segments[0].url;
-            audio.currentTime = 0;
-            
-            // Preload B with segment 1
-            const other = activeAudioRef.current === 'A' ? audioRefB.current : audioRefA.current;
-            if (other && segments.length > 1) {
-              other.src = segments[1].url;
-              other.load();
+            playSegment(0, 0);
+          } else {
+            // Resume from where we paused
+            const idx = currentSegIdxRef.current;
+            const seg = segments[idx];
+            if (seg) {
+              const offsetInSeg = (t - seg.start) * settings.audioSpeed;
+              playSegment(idx, offsetInSeg);
             }
           }
-          audio.playbackRate = settings.audioSpeed;
           ambientRef.current?.play().catch(() => {});
-          await audio.play().catch(() => {});
           setPlaying(true);
         },
         pause: () => {
-          audioRefA.current?.pause();
-          audioRefB.current?.pause();
+          // Save current position before stopping
+          if (currentSourceRef.current && segments.length) {
+            const ctx = getAudioCtx();
+            const idx = currentSegIdxRef.current;
+            const seg = segments[idx];
+            if (seg) {
+              const elapsed = (ctx.currentTime - playStartCtxTimeRef.current) * settings.audioSpeed;
+              const inSeg = playStartOffsetRef.current + elapsed;
+              localTimeRef.current = seg.start + Math.min(inSeg / settings.audioSpeed, seg.duration);
+            }
+          }
+          if (currentSourceRef.current) {
+            try { currentSourceRef.current.onended = null; currentSourceRef.current.stop(); } catch {}
+            currentSourceRef.current = null;
+          }
           ambientRef.current?.pause();
           setPlaying(false);
         },
@@ -418,29 +497,24 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
             (sg) => clamped >= sg.start && clamped < sg.start + sg.duration,
           );
           if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
-          const seg = segments[idx];
           currentSegIdxRef.current = idx;
-          
-          const audio = activeAudioRef.current === 'A' ? audioRefA.current : audioRefB.current;
-          if (!audio) return;
-          if (audio.src !== seg.url) audio.src = seg.url;
-          audio.currentTime = (clamped - seg.start) * settings.audioSpeed;
           localTimeRef.current = clamped;
-          
-          const other = activeAudioRef.current === 'A' ? audioRefB.current : audioRefA.current;
-          const nextSeg = segments[idx + 1];
-          if (other && nextSeg && other.src !== nextSeg.url) {
-            other.src = nextSeg.url;
-            other.load();
+
+          if (playing) {
+            const seg = segments[idx];
+            const offsetInSeg = (clamped - seg.start) * settings.audioSpeed;
+            playSegment(idx, offsetInSeg);
           }
         },
         getDuration: () => duration,
         getCanvas: () => canvasRef.current,
-        getAudioElement: () => activeAudioRef.current === 'A' ? audioRefA.current : audioRefB.current,
-        getAudioElements: () => [audioRefA.current, audioRefB.current, ambientRef.current].filter(Boolean) as HTMLAudioElement[],
+        getAudioElement: () => ambientRef.current,
+        getAudioElements: () => [ambientRef.current].filter(Boolean) as HTMLAudioElement[],
+        getAudioContext: () => _audioCtx,
+        getAudioDestination: () => _audioDest,
         getSegmentTimings: () => segments,
       }),
-      [segments, duration, settings.audioSpeed],
+      [segments, duration, settings.audioSpeed, playing, playSegment],
     );
 
     const { w, h } = getDims(settings);
@@ -455,8 +529,6 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           style={{ maxHeight: "70vh" }}
           aria-label="Video preview"
         />
-        <audio ref={audioRefA} crossOrigin="anonymous" preload="auto" />
-        <audio ref={audioRefB} crossOrigin="anonymous" preload="auto" />
         <audio ref={ambientRef} crossOrigin="anonymous" preload="auto" loop />
         {!ready && (
           <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/60 text-sm text-muted-foreground">
@@ -567,8 +639,6 @@ function drawText(
   );
   if (!selected.length) return;
 
-  // Exactly ONE verse is shown at a time — the one whose audio segment is
-  // active. Previous verses are never stacked or joined together.
   const seg = segments.length
     ? segments[Math.min(segIdx, segments.length - 1)]
     : undefined;
@@ -578,14 +648,12 @@ function drawText(
   const translation =
     currentVerse.translations?.[0]?.text?.replace(/<[^>]*>/g, "") ?? "";
 
-  // Layout
   const maxW = w * (s.maxWidthPct / 100);
   const centerX = w / 2;
   let baseY = h / 2;
   if (s.layout === "bottom-third") baseY = h * 0.72;
   if (s.layout === "split") baseY = h * 0.35;
 
-  // Fade animation based on position inside the active segment
   let alpha = 1;
   if (seg) {
     const inSeg = Math.max(0, t - seg.start);
@@ -595,8 +663,6 @@ function drawText(
   }
   ctx.globalAlpha = alpha;
 
-  // Arabic text — auto-fit: shrink until it wraps to ≤ 4 lines and fits
-  // vertically inside the safe area (long ayahs like 2:282 stay on screen).
   const arabicFont = ARABIC_FONTS.find((f) => f.id === s.arabicFont)?.css ?? "'Amiri', serif";
   const sizeScale = w / 1080;
   ctx.textAlign = "center";
@@ -626,7 +692,6 @@ function drawText(
     y += arLineH;
   });
 
-  // Translation
   if (s.layout !== "arabic-only" && translation && s.translationId) {
     ctx.shadowBlur = 8 * sizeScale;
     const trSize = Math.max(arSize * 0.42, 14);
@@ -642,7 +707,6 @@ function drawText(
     });
   }
 
-  // Reference
   ctx.font = `600 ${Math.max(arSize * 0.28, 14)}px Inter, sans-serif`;
   ctx.fillStyle = "#C9A227";
   const refKey = currentVerse.verse_key ?? "";

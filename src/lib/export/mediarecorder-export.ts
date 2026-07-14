@@ -1,6 +1,8 @@
-// MediaRecorder-based export. Attempts MP4 first (Safari, Chrome recent),
-// falls back to WebM. Runs client-side by capturing the canvas stream and
-// merging in the sequenced audio segments played through an AudioContext.
+// MediaRecorder-based export. Captures the canvas stream and merges it with
+// the AudioContext's MediaStreamDestination from PreviewCanvas.
+// This approach is clean: the preview already routes all audio (recitation +
+// ambient) through a single AudioContext → MediaStreamDestination, so we just
+// grab that stream and combine it with the canvas video stream.
 import type { PreviewHandle } from "@/components/wizard/PreviewCanvas";
 
 export type ExportProgress = {
@@ -17,50 +19,13 @@ const MIME_CANDIDATES = [
   { mime: "video/webm", ext: "webm" },
 ];
 
-let globalAudioCtx: AudioContext | null = null;
-let globalDest: MediaStreamAudioDestinationNode | null = null;
-const connectedSources = new WeakSet<HTMLAudioElement>();
-
-function getMixer() {
-  if (!globalAudioCtx) {
-    globalAudioCtx = new AudioContext();
-    globalDest = globalAudioCtx.createMediaStreamDestination();
-  }
-  return { ctx: globalAudioCtx, dest: globalDest! };
-}
-
-function connectToMixer(el: HTMLAudioElement) {
-  const { ctx, dest } = getMixer();
-  if (!connectedSources.has(el)) {
-    connectedSources.add(el);
-    try {
-      const source = ctx.createMediaElementSource(el);
-      source.connect(dest);
-      source.connect(ctx.destination);
-    } catch (e) {
-      console.warn("Failed to connect audio element to mixer", e);
-    }
-  }
-  // Ensure the context is running
-  if (ctx.state === "suspended") {
-    ctx.resume().catch(() => {});
-  }
-}
-
 export async function exportVideo(
   preview: PreviewHandle,
   onProgress: (p: ExportProgress) => void,
 ): Promise<{ blob: Blob; ext: string; mime: string }> {
   const canvas = preview.getCanvas();
-  const audioEls = preview.getAudioElements ? preview.getAudioElements() : [];
-  // Fallback for older code
-  if (audioEls.length === 0 && preview.getAudioElement) {
-    const a = preview.getAudioElement();
-    if (a) audioEls.push(a);
-  }
   const segments = preview.getSegmentTimings();
-  
-  if (!canvas || !audioEls.length || !segments.length)
+  if (!canvas || !segments.length)
     throw new Error("Preview not ready");
 
   onProgress({ phase: "preparing", progress: 0.05, message: "Preparing streams…" });
@@ -69,15 +34,22 @@ export async function exportVideo(
   if (!chosen) throw new Error("No supported video codec in this browser");
 
   const canvasStream = canvas.captureStream(30);
-  
-  // Route all audio elements through the persistent context
-  audioEls.forEach(connectToMixer);
-  const { dest } = getMixer();
 
-  const combined = new MediaStream([
-    ...canvasStream.getVideoTracks(),
-    ...dest.stream.getAudioTracks(),
-  ]);
+  // Get the audio destination stream from PreviewCanvas's AudioContext.
+  // PreviewCanvas already routes all recitation + ambient audio through this.
+  const audioDest = preview.getAudioDestination?.();
+  
+  let combined: MediaStream;
+  if (audioDest && audioDest.stream.getAudioTracks().length > 0) {
+    combined = new MediaStream([
+      ...canvasStream.getVideoTracks(),
+      ...audioDest.stream.getAudioTracks(),
+    ]);
+  } else {
+    // Fallback: video only (shouldn't happen, but don't crash)
+    console.warn("No audio destination available for export");
+    combined = canvasStream;
+  }
 
   const recorder = new MediaRecorder(combined, {
     mimeType: chosen.mime,
@@ -95,7 +67,7 @@ export async function exportVideo(
 
   recorder.start(500);
   onProgress({ phase: "recording", progress: 0.1, message: "Recording…" });
-  preview.seek(0); // always export from the very beginning so the video matches the preview
+  preview.seek(0);
   await preview.play();
 
   const started = performance.now();

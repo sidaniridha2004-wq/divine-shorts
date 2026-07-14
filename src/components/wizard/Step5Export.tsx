@@ -10,7 +10,7 @@ import { exportVideo, type ExportProgress } from "@/lib/export/webcodecs-export"
 import { saveProject } from "@/lib/projects-store";
 import { buildCaption } from "@/lib/caption";
 import { getMp3QuranReciters } from "@/lib/quran-api";
-import { generateMetadata, LANGUAGES, type LanguageCode } from "@/lib/metadata-generator";
+import { generateMetadata, LANGUAGES, PLATFORMS, type LanguageCode, type PlatformCode } from "@/lib/metadata-generator";
 import { toast } from "sonner";
 import { Download, Save, Copy, Share2, Loader2, Image as ImageIcon } from "lucide-react";
 import type { PreviewHandle } from "@/components/wizard/PreviewCanvas";
@@ -22,6 +22,7 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
   
   // YouTube Metadata State
   const [language, setLanguage] = useState<LanguageCode>("en");
+  const [platform, setPlatform] = useState<PlatformCode>("youtube");
   const [reciterName, setReciterName] = useState("Unknown Reciter");
   
   useEffect(() => {
@@ -33,6 +34,7 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
 
   const metadata = generateMetadata(
     language,
+    platform,
     settings.chapterName,
     reciterName,
     settings.fromAyah,
@@ -164,18 +166,32 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
             <div className="text-sm font-medium">YouTube Assets</div>
             <p className="text-xs text-muted-foreground">Generate localized metadata and thumbnail</p>
           </div>
-          <Select value={language} onValueChange={(v) => setLanguage(v as LanguageCode)}>
-            <SelectTrigger className="w-[140px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {LANGUAGES.map((l) => (
-                <SelectItem key={l.code} value={l.code}>
-                  {l.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <div className="flex items-center gap-2">
+            <Select value={platform} onValueChange={(v) => setPlatform(v as PlatformCode)}>
+              <SelectTrigger className="w-[120px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PLATFORMS.map((p) => (
+                  <SelectItem key={p.code} value={p.code}>
+                    {p.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={language} onValueChange={(v) => setLanguage(v as LanguageCode)}>
+              <SelectTrigger className="w-[140px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {LANGUAGES.map((l) => (
+                  <SelectItem key={l.code} value={l.code}>
+                    {l.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </div>
 
         <div className="space-y-4">

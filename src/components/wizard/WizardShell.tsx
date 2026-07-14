@@ -10,6 +10,7 @@ import { Check, ChevronLeft, ChevronRight, Play, Pause, Sparkles } from "lucide-
 import { useProjectState } from "@/lib/project-state";
 import { RECITERS } from "@/lib/reciters";
 import { THEMES } from "@/lib/themes";
+import { getChapters } from "@/lib/quran-api";
 
 const STEPS = [
   { id: 1, title: "Verse", desc: "Pick a surah and ayahs" },
@@ -37,26 +38,34 @@ export function WizardShell() {
     }
   };
 
-  const surpriseMe = () => {
-    const randReciter = RECITERS[Math.floor(Math.random() * RECITERS.length)];
-    const randTheme = THEMES[Math.floor(Math.random() * THEMES.length)];
-    const pool = [
-      { chapterId: 36, fromAyah: 1, toAyah: 3, name: "Ya-Sin" },
-      { chapterId: 55, fromAyah: 1, toAyah: 4, name: "Ar-Rahman" },
-      { chapterId: 93, fromAyah: 1, toAyah: 5, name: "Ad-Duha" },
-      { chapterId: 94, fromAyah: 1, toAyah: 4, name: "Ash-Sharh" },
-      { chapterId: 103, fromAyah: 1, toAyah: 3, name: "Al-Asr" },
-      { chapterId: 112, fromAyah: 1, toAyah: 4, name: "Al-Ikhlas" },
-    ];
-    const rv = pool[Math.floor(Math.random() * pool.length)];
-    update({
-      chapterId: rv.chapterId,
-      chapterName: rv.name,
-      fromAyah: rv.fromAyah,
-      toAyah: rv.toAyah,
-      reciterId: randReciter.id,
-      themeId: randTheme.id,
-    });
+  const [isSurprising, setIsSurprising] = useState(false);
+
+  const surpriseMe = async () => {
+    setIsSurprising(true);
+    try {
+      const randReciter = RECITERS[Math.floor(Math.random() * RECITERS.length)];
+      const randTheme = THEMES[Math.floor(Math.random() * THEMES.length)];
+      
+      const chapters = await getChapters();
+      const randChapter = chapters[Math.floor(Math.random() * chapters.length)];
+      
+      const maxFrom = Math.max(1, randChapter.verses_count - 2);
+      const randFrom = Math.floor(Math.random() * maxFrom) + 1;
+      const randTo = Math.min(randChapter.verses_count, randFrom + Math.floor(Math.random() * 4));
+
+      update({
+        chapterId: randChapter.id,
+        chapterName: randChapter.name_simple,
+        fromAyah: randFrom,
+        toAyah: randTo,
+        reciterId: randReciter.id,
+        themeId: randTheme.id,
+      });
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsSurprising(false);
+    }
   };
 
   return (
@@ -68,8 +77,8 @@ export function WizardShell() {
             QuranReels
           </a>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={surpriseMe}>
-              <Sparkles className="mr-1 h-4 w-4" /> Surprise me
+            <Button variant="ghost" size="sm" onClick={surpriseMe} disabled={isSurprising}>
+              <Sparkles className={`mr-1 h-4 w-4 ${isSurprising ? 'animate-spin' : ''}`} /> Surprise me
             </Button>
             <a
               href="/projects"

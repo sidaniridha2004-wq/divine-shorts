@@ -1,11 +1,12 @@
-import { useMemo, useState, type CSSProperties } from "react";
+import { useMemo, useState, useCallback, useEffect, type CSSProperties } from "react";
 import { useProjectState } from "@/lib/project-state";
 import { THEMES, THEME_CATEGORIES, type GeneratedTheme } from "@/lib/themes";
+import { searchPexelsVideos, getBestVideoUrl, type PexelsVideo } from "@/lib/pexels-api";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { Shuffle } from "lucide-react";
+import { Shuffle, Search, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
@@ -30,11 +31,27 @@ function generatedStyle(g: GeneratedTheme): CSSProperties {
   }
 }
 
+// Suggested search queries for Islamic / cinematic backgrounds
+const PEXELS_SUGGESTIONS = [
+  "mosque", "night sky stars", "rain window", "ocean waves", "desert sand",
+  "clouds timelapse", "forest fog", "candle flame", "sunset golden",
+  "snow falling", "waterfall", "mountain landscape", "galaxy space",
+  "aurora borealis", "lantern light", "abstract dark", "bokeh lights",
+  "water ripple", "fire flames", "nature aerial",
+];
+
 export function Step4Style() {
   const { settings, update } = useProjectState();
   const [category, setCategory] = useState<string>("all");
   const [q, setQ] = useState("");
   const [hoverId, setHoverId] = useState<string | null>(null);
+
+  // Pexels search state
+  const [pexelsQuery, setPexelsQuery] = useState("");
+  const [pexelsResults, setPexelsResults] = useState<PexelsVideo[]>([]);
+  const [pexelsLoading, setPexelsLoading] = useState(false);
+  const [pexelsHoverId, setPexelsHoverId] = useState<number | null>(null);
+  const [selectedPexelsId, setSelectedPexelsId] = useState<number | null>(null);
 
   const shown = useMemo(() => {
     let list = THEMES;
@@ -47,6 +64,7 @@ export function Step4Style() {
   const randomTheme = () => {
     const t = THEMES[Math.floor(Math.random() * THEMES.length)];
     update({ themeId: t.id, customBg: null });
+    setSelectedPexelsId(null);
     toast.success(`Background: ${t.name}`);
   };
 
@@ -64,11 +82,143 @@ export function Step4Style() {
     reader.readAsDataURL(file);
   };
 
+  // Pexels search handler
+  const searchPexels = useCallback(async (query: string) => {
+    if (!query.trim()) return;
+    setPexelsLoading(true);
+    try {
+      const result = await searchPexelsVideos(query, { orientation: "portrait", perPage: 15 });
+      setPexelsResults(result.videos);
+      if (result.videos.length === 0) {
+        toast.info("No Pexels videos found — try a different search");
+      }
+    } catch (err) {
+      toast.error("Failed to search Pexels videos");
+      console.error(err);
+    } finally {
+      setPexelsLoading(false);
+    }
+  }, []);
+
+  const handlePexelsSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    searchPexels(pexelsQuery);
+  };
+
+  const selectPexelsVideo = (video: PexelsVideo) => {
+    const videoUrl = getBestVideoUrl(video);
+    if (!videoUrl) {
+      toast.error("No suitable video file found");
+      return;
+    }
+    // Use the video URL as a custom background
+    update({ customBg: videoUrl });
+    setSelectedPexelsId(video.id);
+    toast.success(`Background: Pexels video by ${video.user.name}`);
+  };
+
+  // Load initial suggestions on mount
+  useEffect(() => {
+    const randomSuggestion = PEXELS_SUGGESTIONS[Math.floor(Math.random() * PEXELS_SUGGESTIONS.length)];
+    setPexelsQuery(randomSuggestion);
+    searchPexels(randomSuggestion);
+  }, [searchPexels]);
+
   return (
     <div className="space-y-6">
+      {/* ── Pexels Video Search ─────────────────────────────────── */}
       <div>
         <div className="mb-3 flex items-center justify-between gap-3">
-          <Label>Theme ({THEMES.length} backgrounds)</Label>
+          <Label className="flex items-center gap-2">
+            <Search className="h-4 w-4 text-accent" />
+            Search Pexels Videos
+          </Label>
+          <span className="text-[10px] text-muted-foreground">Powered by Pexels</span>
+        </div>
+        <form onSubmit={handlePexelsSearch} className="mb-3 flex gap-2">
+          <Input
+            value={pexelsQuery}
+            onChange={(e) => setPexelsQuery(e.target.value)}
+            placeholder="Search any background… (e.g. mosque, rain, stars)"
+            className="flex-1"
+          />
+          <Button type="submit" size="sm" disabled={pexelsLoading || !pexelsQuery.trim()}>
+            {pexelsLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+          </Button>
+        </form>
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          {PEXELS_SUGGESTIONS.slice(0, 10).map((s) => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => { setPexelsQuery(s); searchPexels(s); }}
+              className={`rounded-full border px-2.5 py-1 text-[10px] transition ${
+                pexelsQuery === s
+                  ? "border-accent bg-accent/20 text-accent"
+                  : "border-border bg-card text-muted-foreground hover:border-accent/50"
+              }`}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+        {pexelsLoading && (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-6 w-6 animate-spin text-accent" />
+            <span className="ml-2 text-sm text-muted-foreground">Searching Pexels…</span>
+          </div>
+        )}
+        {!pexelsLoading && pexelsResults.length > 0 && (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {pexelsResults.map((video) => {
+              const active = selectedPexelsId === video.id;
+              const hovering = pexelsHoverId === video.id;
+              const videoUrl = getBestVideoUrl(video);
+              return (
+                <button
+                  key={video.id}
+                  type="button"
+                  onClick={() => selectPexelsVideo(video)}
+                  onMouseEnter={() => setPexelsHoverId(video.id)}
+                  onMouseLeave={() => setPexelsHoverId((h) => (h === video.id ? null : h))}
+                  className={`group relative aspect-[9/16] overflow-hidden rounded-xl border transition ${
+                    active
+                      ? "border-accent shadow-gold"
+                      : "border-border hover:border-accent/50"
+                  }`}
+                >
+                  {!hovering && (
+                    <img
+                      src={video.image}
+                      alt={`Video by ${video.user.name}`}
+                      className="absolute inset-0 h-full w-full object-cover"
+                      loading="lazy"
+                    />
+                  )}
+                  {hovering && videoUrl && (
+                    <video
+                      src={videoUrl}
+                      autoPlay
+                      muted
+                      loop
+                      playsInline
+                      className="absolute inset-0 h-full w-full object-cover"
+                    />
+                  )}
+                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-2 text-left text-[10px] font-medium text-white">
+                    📷 {video.user.name}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* ── Built-in Themes ─────────────────────────────────────── */}
+      <div>
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <Label>Built-in Themes ({THEMES.length} backgrounds)</Label>
           <Button variant="ghost" size="sm" onClick={randomTheme}>
             <Shuffle className="mr-1 h-4 w-4" /> Random
           </Button>
@@ -92,7 +242,7 @@ export function Step4Style() {
         <Input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Search backgrounds…"
+          placeholder="Search built-in backgrounds…"
           className="mb-3"
         />
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -103,7 +253,7 @@ export function Step4Style() {
               <button
                 key={t.id}
                 type="button"
-                onClick={() => update({ themeId: t.id, customBg: null })}
+                onClick={() => { update({ themeId: t.id, customBg: null }); setSelectedPexelsId(null); }}
                 onMouseEnter={() => setHoverId(t.id)}
                 onMouseLeave={() => setHoverId((h) => (h === t.id ? null : h))}
                 className={`group relative aspect-[9/16] overflow-hidden rounded-xl border transition ${
@@ -158,7 +308,7 @@ export function Step4Style() {
           <button
             type="button"
             className="mt-2 text-xs text-accent underline"
-            onClick={() => update({ customBg: null })}
+            onClick={() => { update({ customBg: null }); setSelectedPexelsId(null); }}
           >
             Remove custom background
           </button>

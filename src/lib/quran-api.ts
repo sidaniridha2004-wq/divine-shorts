@@ -94,12 +94,20 @@ export async function getChapterAudio(
 // no verse-by-verse audio, AND to expose reciters (like Yasser Al-Dossary)
 // that are otherwise unavailable via the Quran.com API.
 export const EVERYAYAH_FOLDERS: Record<number, string> = {
-  // Custom high ids reserved for app-only reciters (not in Quran.com list)
+  // App-only reciters (not in Quran.com list)
   9001: "Yasser_Ad-Dussary_128kbps",
   9002: "Nasser_Alqatami_128kbps",
   9003: "Maher_AlMuaiqly_64kbps",
   9004: "Ahmed_ibn_Ali_al-Ajamy_128kbps",
   9005: "Salah_AlBudair_128kbps",
+  9006: "Ghamadi_40kbps",
+  9007: "Muhammad_Jibreel_128kbps",
+  9008: "Muhammad_Ayyoub_128kbps",
+  9009: "Abdullah_Basfar_192kbps",
+  9010: "Khalifa_Taniji_64kbps",
+  9011: "Fares_Abbad_64kbps",
+  9012: "Ali_Jaber_64kbps",
+  9013: "Mohammad_al_Tablaway_128kbps",
   // Known Quran.com reciter ids → matching everyayah folder (fallback)
   1: "Abdul_Basit_Mujawwad_128kbps",
   2: "Abdul_Basit_Murattal_192kbps",

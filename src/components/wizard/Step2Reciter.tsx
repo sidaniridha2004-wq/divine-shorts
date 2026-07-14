@@ -43,25 +43,26 @@ export function Step2Reciter() {
   useEffect(() => {
     getRecitations()
       .then((list) => {
-        if (!list.length) {
-          setReciters(RECITERS);
-          return;
-        }
-        setReciters(
-          list.map((r, i) => {
-            const name = r.translated_name?.name || r.reciter_name;
-            return {
-              id: r.id,
-              name,
-              arabic: ARABIC_NAMES[r.id] ?? "",
-              style: r.style || "Murattal",
-              accent: RECITER_ACCENTS[i % RECITER_ACCENTS.length],
-              initials: initialsOf(name),
-            };
-          }),
-        );
+        const fromApi: Reciter[] = list.length
+          ? list.map((r, i) => {
+              const name = r.translated_name?.name || r.reciter_name;
+              return {
+                id: r.id,
+                name,
+                arabic: ARABIC_NAMES[r.id] ?? "",
+                style: r.style || "Murattal",
+                accent: RECITER_ACCENTS[i % RECITER_ACCENTS.length],
+                initials: initialsOf(name),
+              };
+            })
+          : RECITERS;
+        // Merge in extra reciters served via everyayah.com (e.g. Yasser Al-Dossary),
+        // pinned to the top so users can find them easily. Skip duplicates by id.
+        const seen = new Set(fromApi.map((r) => r.id));
+        const extras = EVERYAYAH_RECITERS.filter((r) => !seen.has(r.id));
+        setReciters([...extras, ...fromApi]);
       })
-      .catch(() => setReciters(RECITERS));
+      .catch(() => setReciters([...EVERYAYAH_RECITERS, ...RECITERS]));
   }, []);
 
   // Stop preview audio when leaving this step

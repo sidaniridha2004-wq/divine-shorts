@@ -1,12 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  RECITERS,
-  AMBIENT_TRACKS,
-  EVERYAYAH_RECITERS,
-  type Reciter,
-} from "@/lib/reciters";
+import { AMBIENT_TRACKS } from "@/lib/reciters";
 import { useProjectState } from "@/lib/project-state";
-import { getAyahAudioSegments, EVERYAYAH_FOLDERS } from "@/lib/quran-api";
+import { getMp3QuranReciters, type Mp3QuranReciter } from "@/lib/quran-api";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
@@ -29,19 +24,15 @@ function loadFavs(): number[] {
 
 export function Step2Reciter() {
   const { settings, update } = useProjectState();
-  const [reciters, setReciters] = useState<Reciter[] | null>(null);
+  const [reciters, setReciters] = useState<Mp3QuranReciter[] | null>(null);
   const [query, setQuery] = useState("");
   const [favs, setFavs] = useState<number[]>(loadFavs);
   const [previewingId, setPreviewingId] = useState<number | null>(null);
   const [loadingId, setLoadingId] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Only show reciters we can actually stream audio for.
-  // Everyayah-served reciters (including Yasser Al-Dossary) all work per-ayah.
-  // Quran.com reciters are included only if we have a verified everyayah fallback folder.
   useEffect(() => {
-    const verifiedQuranCom = RECITERS.filter((r) => EVERYAYAH_FOLDERS[r.id]);
-    setReciters([...EVERYAYAH_RECITERS, ...verifiedQuranCom]);
+    getMp3QuranReciters().then(setReciters);
   }, []);
 
 
@@ -65,8 +56,7 @@ export function Step2Reciter() {
       ? base.filter(
           (r) =>
             r.name.toLowerCase().includes(q) ||
-            r.arabic.includes(query.trim()) ||
-            r.style.toLowerCase().includes(q),
+            r.rewaya.toLowerCase().includes(q),
         )
       : base;
     // Favorites pinned to the top (stable order otherwise)
@@ -83,21 +73,15 @@ export function Step2Reciter() {
     }
     setLoadingId(reciterId);
     try {
-      const segs = await getAyahAudioSegments(reciterId, settings.chapterId);
-      if (!segs.length) {
-        toast.error("This reciter has no audio for this surah — try another");
-        return;
-      }
-      const first =
-        segs.find((s) => {
-          const [, v] = s.verse_key.split(":").map(Number);
-          return v === settings.fromAyah;
-        }) ?? segs[0];
+      const reciter = reciters?.find(r => r.id === reciterId);
+      if (!reciter) throw new Error();
+      
       if (!audioRef.current) {
         audioRef.current = new Audio();
         audioRef.current.crossOrigin = "anonymous";
       }
-      audioRef.current.src = first.url;
+      // Preview with Surah Al-Fatihah (001)
+      audioRef.current.src = `${reciter.folder_url}001.mp3`;
       audioRef.current.onended = () => setPreviewingId(null);
       await audioRef.current.play();
       setPreviewingId(reciterId);
@@ -163,19 +147,16 @@ export function Step2Reciter() {
                     />
                   </button>
                   <div
-                    className={`grid h-14 w-14 place-items-center rounded-full bg-gradient-to-br ${r.accent} font-display text-lg font-bold text-white`}
+                    className={`grid h-14 w-14 place-items-center rounded-full bg-gradient-to-br from-emerald-500 to-teal-700 font-display text-lg font-bold text-white`}
                   >
-                    {r.initials}
+                    {r.name.split(" ").slice(0,2).map(n => n[0]).join("")}
                   </div>
                   <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">{r.name}</div>
-                    {r.arabic && (
-                      <div dir="rtl" className="truncate font-arabic text-xs text-muted-foreground">
-                        {r.arabic}
-                      </div>
-                    )}
-                    <div className="text-[10px] uppercase tracking-widest text-accent">
-                      {r.style}
+                    <div dir="rtl" className="truncate font-arabic text-sm font-medium text-foreground">
+                      {r.name}
+                    </div>
+                    <div className="text-[10px] tracking-widest text-accent">
+                      {r.rewaya}
                     </div>
                   </div>
                   <button

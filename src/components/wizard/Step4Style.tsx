@@ -1,7 +1,7 @@
 import { useMemo, useState, useCallback, useEffect, type CSSProperties } from "react";
 import { useProjectState } from "@/lib/project-state";
 import { THEMES, THEME_CATEGORIES, type GeneratedTheme } from "@/lib/themes";
-import { searchPexelsVideos, getBestVideoUrl, type PexelsVideo } from "@/lib/pexels-api";
+import { searchPexelsVideos, searchPexelsPhotos, getBestVideoUrl, type PexelsVideo, type PexelsPhoto } from "@/lib/pexels-api";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
@@ -48,7 +48,9 @@ export function Step4Style() {
 
   // Pexels search state
   const [pexelsQuery, setPexelsQuery] = useState("");
-  const [pexelsResults, setPexelsResults] = useState<PexelsVideo[]>([]);
+  const [pexelsType, setPexelsType] = useState<"video" | "photo">("video");
+  const [pexelsVideoResults, setPexelsVideoResults] = useState<PexelsVideo[]>([]);
+  const [pexelsPhotoResults, setPexelsPhotoResults] = useState<PexelsPhoto[]>([]);
   const [pexelsLoading, setPexelsLoading] = useState(false);
   const [pexelsHoverId, setPexelsHoverId] = useState<number | null>(null);
   const [selectedPexelsId, setSelectedPexelsId] = useState<number | null>(null);
@@ -83,17 +85,21 @@ export function Step4Style() {
   };
 
   // Pexels search handler
-  const searchPexels = useCallback(async (query: string) => {
+  const searchPexels = useCallback(async (query: string, type: "video" | "photo") => {
     if (!query.trim()) return;
     setPexelsLoading(true);
     try {
-      const result = await searchPexelsVideos(query, { orientation: "portrait", perPage: 15 });
-      setPexelsResults(result.videos);
-      if (result.videos.length === 0) {
-        toast.info("No Pexels videos found — try a different search");
+      if (type === "video") {
+        const result = await searchPexelsVideos(query, { orientation: "portrait", perPage: 15 });
+        setPexelsVideoResults(result.videos || []);
+        if (!result.videos?.length) toast.info("No Pexels videos found — try a different search");
+      } else {
+        const result = await searchPexelsPhotos(query, { orientation: "portrait", perPage: 15 });
+        setPexelsPhotoResults(result.photos || []);
+        if (!result.photos?.length) toast.info("No Pexels photos found — try a different search");
       }
     } catch (err) {
-      toast.error("Failed to search Pexels videos");
+      toast.error(`Failed to search Pexels ${type}s`);
       console.error(err);
     } finally {
       setPexelsLoading(false);
@@ -102,7 +108,7 @@ export function Step4Style() {
 
   const handlePexelsSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    searchPexels(pexelsQuery);
+    searchPexels(pexelsQuery, pexelsType);
   };
 
   const selectPexelsVideo = (video: PexelsVideo) => {
@@ -111,35 +117,61 @@ export function Step4Style() {
       toast.error("No suitable video file found");
       return;
     }
-    // Use the video URL as a custom background
     update({ customBg: videoUrl });
     setSelectedPexelsId(video.id);
     toast.success(`Background: Pexels video by ${video.user.name}`);
+  };
+
+  const selectPexelsPhoto = (photo: PexelsPhoto) => {
+    update({ customBg: photo.src.large2x });
+    setSelectedPexelsId(photo.id);
+    toast.success(`Background: Pexels photo by ${photo.photographer}`);
   };
 
   // Load initial suggestions on mount
   useEffect(() => {
     const randomSuggestion = PEXELS_SUGGESTIONS[Math.floor(Math.random() * PEXELS_SUGGESTIONS.length)];
     setPexelsQuery(randomSuggestion);
-    searchPexels(randomSuggestion);
-  }, [searchPexels]);
+    searchPexels(randomSuggestion, pexelsType);
+  }, [searchPexels]); // deliberately omit pexelsType so it only runs once
 
   return (
     <div className="space-y-6">
-      {/* ── Pexels Video Search ─────────────────────────────────── */}
+      {/* ── Pexels Search ─────────────────────────────────── */}
       <div>
         <div className="mb-3 flex items-center justify-between gap-3">
           <Label className="flex items-center gap-2">
             <Search className="h-4 w-4 text-accent" />
-            Search Pexels Videos
+            Search Pexels Media
           </Label>
           <span className="text-[10px] text-muted-foreground">Powered by Pexels</span>
         </div>
+        
+        <div className="mb-3 flex gap-2">
+          {(["video", "photo"] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => {
+                setPexelsType(t);
+                if (pexelsQuery) searchPexels(pexelsQuery, t);
+              }}
+              className={`rounded-md border px-4 py-1.5 text-xs capitalize transition ${
+                pexelsType === t
+                  ? "border-accent bg-accent/20 text-accent font-medium"
+                  : "border-border bg-card text-muted-foreground hover:border-accent/50"
+              }`}
+            >
+              {t}s
+            </button>
+          ))}
+        </div>
+
         <form onSubmit={handlePexelsSearch} className="mb-3 flex gap-2">
           <Input
             value={pexelsQuery}
             onChange={(e) => setPexelsQuery(e.target.value)}
-            placeholder="Search any background… (e.g. mosque, rain, stars)"
+            placeholder={`Search ${pexelsType}s… (e.g. mosque, rain, stars)`}
             className="flex-1"
           />
           <Button type="submit" size="sm" disabled={pexelsLoading || !pexelsQuery.trim()}>
@@ -151,7 +183,7 @@ export function Step4Style() {
             <button
               key={s}
               type="button"
-              onClick={() => { setPexelsQuery(s); searchPexels(s); }}
+              onClick={() => { setPexelsQuery(s); searchPexels(s, pexelsType); }}
               className={`rounded-full border px-2.5 py-1 text-[10px] transition ${
                 pexelsQuery === s
                   ? "border-accent bg-accent/20 text-accent"
@@ -168,9 +200,9 @@ export function Step4Style() {
             <span className="ml-2 text-sm text-muted-foreground">Searching Pexels…</span>
           </div>
         )}
-        {!pexelsLoading && pexelsResults.length > 0 && (
+        {!pexelsLoading && pexelsType === "video" && pexelsVideoResults.length > 0 && (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            {pexelsResults.map((video) => {
+            {pexelsVideoResults.map((video) => {
               const active = selectedPexelsId === video.id;
               const hovering = pexelsHoverId === video.id;
               const videoUrl = getBestVideoUrl(video);
@@ -207,6 +239,36 @@ export function Step4Style() {
                   )}
                   <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-2 text-left text-[10px] font-medium text-white">
                     📷 {video.user.name}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        
+        {!pexelsLoading && pexelsType === "photo" && pexelsPhotoResults.length > 0 && (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {pexelsPhotoResults.map((photo) => {
+              const active = selectedPexelsId === photo.id;
+              return (
+                <button
+                  key={photo.id}
+                  type="button"
+                  onClick={() => selectPexelsPhoto(photo)}
+                  className={`group relative aspect-[9/16] overflow-hidden rounded-xl border transition ${
+                    active
+                      ? "border-accent shadow-gold"
+                      : "border-border hover:border-accent/50"
+                  }`}
+                >
+                  <img
+                    src={photo.src.large}
+                    alt={`Photo by ${photo.photographer}`}
+                    className="absolute inset-0 h-full w-full object-cover"
+                    loading="lazy"
+                  />
+                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-2 text-left text-[10px] font-medium text-white">
+                    📷 {photo.photographer}
                   </div>
                 </button>
               );

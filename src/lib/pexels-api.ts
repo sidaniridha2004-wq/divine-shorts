@@ -1,4 +1,4 @@
-// Pexels API client for fetching video backgrounds dynamically.
+// Pexels API client for fetching video and photo backgrounds dynamically.
 const PEXELS_API_KEY = "lbV02U2COOBmyvC03Ie3kiA0xfI7V9KnJIGUQS9LGcIVqtxIxV7pKY9c";
 
 export type PexelsVideo = {
@@ -16,11 +16,29 @@ export type PexelsVideo = {
   }[];
 };
 
+export type PexelsPhoto = {
+  id: number;
+  url: string;
+  photographer: string;
+  photographer_url: string;
+  src: {
+    original: string;
+    large2x: string;
+    large: string;
+    medium: string;
+    small: string;
+    portrait: string;
+    landscape: string;
+    tiny: string;
+  };
+};
+
 export type PexelsSearchResult = {
   total_results: number;
   page: number;
   per_page: number;
-  videos: PexelsVideo[];
+  videos?: PexelsVideo[];
+  photos?: PexelsPhoto[];
 };
 
 /**
@@ -39,6 +57,28 @@ export async function searchPexelsVideos(
   });
 
   const res = await fetch(`https://api.pexels.com/videos/search?${params}`, {
+    headers: { Authorization: PEXELS_API_KEY },
+  });
+
+  if (!res.ok) throw new Error(`Pexels API ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Search for photos on Pexels.
+ */
+export async function searchPexelsPhotos(
+  query: string,
+  opts: { orientation?: "portrait" | "landscape" | "square"; page?: number; perPage?: number } = {},
+): Promise<PexelsSearchResult> {
+  const params = new URLSearchParams({
+    query,
+    orientation: opts.orientation ?? "portrait",
+    page: String(opts.page ?? 1),
+    per_page: String(opts.perPage ?? 12),
+  });
+
+  const res = await fetch(`https://api.pexels.com/v1/search?${params}`, {
     headers: { Authorization: PEXELS_API_KEY },
   });
 

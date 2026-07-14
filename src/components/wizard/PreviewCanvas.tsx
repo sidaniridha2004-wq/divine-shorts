@@ -9,7 +9,7 @@ import {
 import { useProjectState, type ProjectSettings } from "@/lib/project-state";
 import { THEMES, type GeneratedTheme } from "@/lib/themes";
 import { ARABIC_FONTS } from "@/lib/translations";
-import { getAyahAudioSegments, getVersesByChapter, type Verse } from "@/lib/quran-api";
+import { getVersesByChapter, getAyahTimings, getMp3QuranReciters, type Verse } from "@/lib/quran-api";
 import { AMBIENT_TRACKS } from "@/lib/reciters";
 
 export type PreviewHandle = {
@@ -25,7 +25,7 @@ export type PreviewHandle = {
   getSegmentTimings: () => { verse_key: string; start: number; duration: number }[];
 };
 
-type Segment = { verse_key: string; url: string; start: number; duration: number };
+type Segment = { verse_key: string; start: number; duration: number; absoluteStart: number; absoluteEnd: number };
 
 const ASPECT_DIMS: Record<string, { w: number; h: number }> = {
   "9:16": { w: 1080, h: 1920 },
@@ -81,7 +81,6 @@ function probeDuration(url: string): Promise<number | null> {
   });
 }
 
-// ── Ambient audio connection (one-time) ─────────────────────────────────
 const _connectedAmbient = new WeakSet<HTMLAudioElement>();
 function connectAmbientToCtx(el: HTMLAudioElement) {
   if (_connectedAmbient.has(el)) return;
@@ -95,11 +94,24 @@ function connectAmbientToCtx(el: HTMLAudioElement) {
   }
 }
 
+const _connectedReciter = new WeakSet<HTMLAudioElement>();
+function connectReciterToCtx(el: HTMLAudioElement) {
+  if (_connectedReciter.has(el)) return;
+  _connectedReciter.add(el);
+  try {
+    const ctx = getAudioCtx();
+    const src = ctx.createMediaElementSource(el);
+    src.connect(getMasterGain());
+  } catch (e) {
+    console.warn("reciter connect failed", e);
+  }
+}
+
 export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number, d: number) => void }>(
   function PreviewCanvas({ onProgress }, ref) {
     const { settings } = useProjectState();
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const videoRef = useRef<HTMLVideoElement | null>(null);
+    const reciterAudioRef = useRef<HTMLAudioElement>(null);
     const ambientRef = useRef<HTMLAudioElement>(null);
     const rafRef = useRef<number | null>(null);
     const [verses, setVerses] = useState<Verse[]>([]);
@@ -109,12 +121,6 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
     const [ready, setReady] = useState(false);
     const localTimeRef = useRef(0);
     const currentSegIdxRef = useRef(0);
-
-    // AudioBuffer engine refs
-    const audioBuffersRef = useRef<(AudioBuffer | null)[]>([]);
-    const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
-    const playStartCtxTimeRef = useRef(0);   // ctx.currentTime when source.start() was called
-    const playStartOffsetRef = useRef(0);    // offset into the current buffer where playback began
 
     // Load verses when chapter or translation changes
     useEffect(() => {
@@ -134,40 +140,56 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       };
     }, [settings.chapterId, settings.translationId]);
 
-    // Load audio segments when reciter/chapter/range changes
+    // Load audio timings and set up single reciter stream
     useEffect(() => {
       let alive = true;
       setReady(false);
       setSegments([]);
       setDuration(0);
-      audioBuffersRef.current = [];
       (async () => {
-        const segs = await getAyahAudioSegments(settings.reciterId, settings.chapterId);
-        const filtered = segs
-          .filter((s) => {
-            const [, v] = s.verse_key.split(":").map(Number);
-            return v >= settings.fromAyah && v <= settings.toAyah;
-          })
-          .sort(
-            (a, b) =>
-              Number(a.verse_key.split(":")[1]) - Number(b.verse_key.split(":")[1]),
-          );
-        // Probe the real duration of every segment so timings are exact.
-        const probed = await Promise.all(filtered.map((s) => probeDuration(s.url)));
+        const timings = await getAyahTimings(settings.chapterId, settings.reciterId);
+        const reciters = await getMp3QuranReciters();
+        const reciter = reciters.find(r => r.id === settings.reciterId);
+        
         if (!alive) return;
-        let t = 0;
-        const withTiming: Segment[] = filtered.map((s, i) => {
-          const api = s.duration ? (s.duration > 100 ? s.duration / 1000 : s.duration) : null;
-          const raw = probed[i] ?? api ?? 5;
-          const dur = raw / settings.audioSpeed;
-          const entry = { verse_key: s.verse_key, url: s.url, start: t, duration: dur };
-          t += dur;
-          return entry;
+        if (!timings.length || !reciter) {
+          setSegments([]);
+          setReady(true);
+          return;
+        }
+
+        const filtered = timings.filter(t => t.ayah >= settings.fromAyah && t.ayah <= settings.toAyah);
+        if (!filtered.length) {
+          setSegments([]);
+          setReady(true);
+          return;
+        }
+
+        const audioUrl = `${reciter.folder_url}${String(settings.chapterId).padStart(3, '0')}.mp3`;
+        if (reciterAudioRef.current && reciterAudioRef.current.src !== audioUrl) {
+          reciterAudioRef.current.src = audioUrl;
+          reciterAudioRef.current.load();
+        }
+
+        const baseOffset = filtered[0].start_time / 1000;
+        const totalDuration = (filtered[filtered.length - 1].end_time / 1000) - baseOffset;
+
+        const newSegments = filtered.map(t => {
+          const absStart = t.start_time / 1000;
+          const absEnd = t.end_time / 1000;
+          return {
+            verse_key: `${settings.chapterId}:${t.ayah}`,
+            start: absStart - baseOffset,
+            duration: absEnd - absStart,
+            absoluteStart: absStart,
+            absoluteEnd: absEnd,
+          };
         });
+
         currentSegIdxRef.current = 0;
         localTimeRef.current = 0;
-        setSegments(withTiming);
-        setDuration(t);
+        setSegments(newSegments);
+        setDuration(totalDuration);
         setReady(true);
       })().catch(() => {
         if (alive) {
@@ -178,98 +200,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       return () => {
         alive = false;
       };
-    }, [settings.reciterId, settings.chapterId, settings.fromAyah, settings.toAyah, settings.audioSpeed]);
-
-    // Fetch & decode AudioBuffers when segments change
-    useEffect(() => {
-      if (!segments.length) return;
-      let alive = true;
-      const ctx = getAudioCtx();
-      (async () => {
-        const buffers = await Promise.all(
-          segments.map(async (seg) => {
-            try {
-              const res = await fetch(seg.url);
-              const ab = await res.arrayBuffer();
-              return await ctx.decodeAudioData(ab);
-            } catch (e) {
-              console.warn("Failed to decode audio:", seg.url, e);
-              return null;
-            }
-          }),
-        );
-        if (alive) {
-          audioBuffersRef.current = buffers;
-          // Update segment durations from decoded buffers (most accurate)
-          setSegments((prev) => {
-            let t = 0;
-            const updated = prev.map((s, i) => {
-              const buf = buffers[i];
-              const dur = buf ? buf.duration / settings.audioSpeed : s.duration;
-              const entry = { ...s, start: t, duration: dur };
-              t += dur;
-              return entry;
-            });
-            setDuration(t);
-            return updated;
-          });
-        }
-      })();
-      return () => { alive = false; };
-    }, [segments.length > 0 ? segments.map(s => s.url).join(",") : ""]);
-
-    // ── Play a specific segment using AudioBufferSourceNode ──────────────
-    const playSegment = useCallback((segIdx: number, offsetInBuffer: number = 0) => {
-      // Stop any currently playing source
-      if (currentSourceRef.current) {
-        try { currentSourceRef.current.onended = null; currentSourceRef.current.stop(); } catch {}
-        currentSourceRef.current = null;
-      }
-
-      const buffer = audioBuffersRef.current[segIdx];
-      if (!buffer) {
-        // No buffer available, advance to next segment
-        const nextIdx = segIdx + 1;
-        if (nextIdx < segments.length) {
-          currentSegIdxRef.current = nextIdx;
-          localTimeRef.current = segments[nextIdx].start;
-          playSegment(nextIdx, 0);
-        } else {
-          setPlaying(false);
-          currentSegIdxRef.current = 0;
-          localTimeRef.current = 0;
-          ambientRef.current?.pause();
-        }
-        return;
-      }
-
-      const ctx = getAudioCtx();
-      const source = ctx.createBufferSource();
-      source.buffer = buffer;
-      source.playbackRate.value = settings.audioSpeed;
-      source.connect(getMasterGain());
-      currentSourceRef.current = source;
-      playStartCtxTimeRef.current = ctx.currentTime;
-      playStartOffsetRef.current = offsetInBuffer;
-
-      source.onended = () => {
-        if (currentSourceRef.current !== source) return; // stale
-        const nextIdx = segIdx + 1;
-        if (nextIdx < segments.length) {
-          currentSegIdxRef.current = nextIdx;
-          localTimeRef.current = segments[nextIdx].start;
-          playSegment(nextIdx, 0);
-        } else {
-          setPlaying(false);
-          currentSegIdxRef.current = 0;
-          localTimeRef.current = 0;
-          currentSourceRef.current = null;
-          ambientRef.current?.pause();
-        }
-      };
-
-      source.start(0, offsetInBuffer);
-    }, [segments, settings.audioSpeed]);
+    }, [settings.reciterId, settings.chapterId, settings.fromAyah, settings.toAyah]);
 
     // Load background
     useEffect(() => {
@@ -420,14 +351,32 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
     useEffect(() => {
       const loop = () => {
         let t = localTimeRef.current;
-        const idx = currentSegIdxRef.current;
-        const seg = segments[idx];
-        if (playing && currentSourceRef.current && seg) {
-          const ctx = getAudioCtx();
-          const elapsed = (ctx.currentTime - playStartCtxTimeRef.current) * settings.audioSpeed;
-          const inSeg = playStartOffsetRef.current + elapsed;
-          t = seg.start + Math.min(inSeg / settings.audioSpeed, seg.duration);
+        let idx = currentSegIdxRef.current;
+        
+        if (playing && reciterAudioRef.current && segments.length) {
+          const first = segments[0];
+          const last = segments[segments.length - 1];
+          const cTime = reciterAudioRef.current.currentTime;
+          
+          t = (cTime - first.absoluteStart) / settings.audioSpeed;
+
+          // Stop if reached the end of the last segment
+          if (cTime >= last.absoluteEnd) {
+            reciterAudioRef.current.pause();
+            ambientRef.current?.pause();
+            setPlaying(false);
+            t = duration;
+          }
+
+          // Find current segment index based on absolute time
+          idx = segments.findIndex(sg => cTime >= sg.absoluteStart && cTime < sg.absoluteEnd);
+          if (idx === -1) {
+            // fallback if drifting
+            idx = cTime >= last.absoluteEnd ? segments.length - 1 : 0;
+          }
         }
+        
+        currentSegIdxRef.current = idx;
         localTimeRef.current = t;
         draw(t, idx);
         onProgress?.(t, duration);
@@ -447,43 +396,33 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           const ctx = getAudioCtx();
           if (ctx.state === "suspended") await ctx.resume();
 
-          // Connect ambient to AudioContext on first play
           if (ambientRef.current) connectAmbientToCtx(ambientRef.current);
+          if (reciterAudioRef.current) {
+            connectReciterToCtx(reciterAudioRef.current);
+            reciterAudioRef.current.playbackRate = settings.audioSpeed;
+          }
 
+          const first = segments[0];
+          let resumeTime = first.absoluteStart;
+          
           const t = localTimeRef.current;
           const resuming = t > 0.05 && t < duration - 0.05;
-          if (!resuming) {
-            currentSegIdxRef.current = 0;
-            localTimeRef.current = 0;
-            playSegment(0, 0);
+          if (resuming) {
+            resumeTime = first.absoluteStart + (t * settings.audioSpeed);
           } else {
-            // Resume from where we paused
-            const idx = currentSegIdxRef.current;
-            const seg = segments[idx];
-            if (seg) {
-              const offsetInSeg = (t - seg.start) * settings.audioSpeed;
-              playSegment(idx, offsetInSeg);
-            }
+            localTimeRef.current = 0;
+            currentSegIdxRef.current = 0;
+          }
+
+          if (reciterAudioRef.current) {
+            reciterAudioRef.current.currentTime = resumeTime;
+            reciterAudioRef.current.play().catch(e => console.warn("reciter play error", e));
           }
           ambientRef.current?.play().catch(() => {});
           setPlaying(true);
         },
         pause: () => {
-          // Save current position before stopping
-          if (currentSourceRef.current && segments.length) {
-            const ctx = getAudioCtx();
-            const idx = currentSegIdxRef.current;
-            const seg = segments[idx];
-            if (seg) {
-              const elapsed = (ctx.currentTime - playStartCtxTimeRef.current) * settings.audioSpeed;
-              const inSeg = playStartOffsetRef.current + elapsed;
-              localTimeRef.current = seg.start + Math.min(inSeg / settings.audioSpeed, seg.duration);
-            }
-          }
-          if (currentSourceRef.current) {
-            try { currentSourceRef.current.onended = null; currentSourceRef.current.stop(); } catch {}
-            currentSourceRef.current = null;
-          }
+          reciterAudioRef.current?.pause();
           ambientRef.current?.pause();
           setPlaying(false);
         },
@@ -493,23 +432,22 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
             localTimeRef.current = clamped;
             return;
           }
-          let idx = segments.findIndex(
-            (sg) => clamped >= sg.start && clamped < sg.start + sg.duration,
-          );
+          
+          localTimeRef.current = clamped;
+          const targetAbsTime = segments[0].absoluteStart + (clamped * settings.audioSpeed);
+          
+          if (reciterAudioRef.current) {
+            reciterAudioRef.current.currentTime = targetAbsTime;
+          }
+
+          let idx = segments.findIndex(sg => targetAbsTime >= sg.absoluteStart && targetAbsTime < sg.absoluteEnd);
           if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
           currentSegIdxRef.current = idx;
-          localTimeRef.current = clamped;
-
-          if (playing) {
-            const seg = segments[idx];
-            const offsetInSeg = (clamped - seg.start) * settings.audioSpeed;
-            playSegment(idx, offsetInSeg);
-          }
         },
         getDuration: () => duration,
         getCanvas: () => canvasRef.current,
-        getAudioElement: () => ambientRef.current,
-        getAudioElements: () => [ambientRef.current].filter(Boolean) as HTMLAudioElement[],
+        getAudioElement: () => reciterAudioRef.current,
+        getAudioElements: () => [reciterAudioRef.current, ambientRef.current].filter(Boolean) as HTMLAudioElement[],
         getAudioContext: () => _audioCtx,
         getAudioDestination: () => _audioDest,
         getSegmentTimings: () => segments,
@@ -529,6 +467,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           style={{ maxHeight: "70vh" }}
           aria-label="Video preview"
         />
+        <audio ref={reciterAudioRef} crossOrigin="anonymous" preload="auto" />
         <audio ref={ambientRef} crossOrigin="anonymous" preload="auto" loop />
         {!ready && (
           <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/60 text-sm text-muted-foreground">

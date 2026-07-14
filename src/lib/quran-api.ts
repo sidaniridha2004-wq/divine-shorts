@@ -27,23 +27,24 @@ export type TranslationResource = {
 
 const cache = new Map<string, unknown>();
 
-async function fetchJson<T>(path: string): Promise<T> {
-  if (cache.has(path)) return cache.get(path) as T;
-  const lsKey = `quranreels:api:${path}`;
+async function fetchJson<T>(path: string, base: string = BASE): Promise<T> {
+  const fullUrl = path.startsWith("http") ? path : `${base}${path}`;
+  if (cache.has(fullUrl)) return cache.get(fullUrl) as T;
+  const lsKey = `quranreels:api:${fullUrl}`;
   if (typeof window !== "undefined") {
     try {
       const stored = localStorage.getItem(lsKey);
       if (stored) {
         const parsed = JSON.parse(stored);
-        cache.set(path, parsed);
+        cache.set(fullUrl, parsed);
         return parsed as T;
       }
     } catch {}
   }
-  const res = await fetch(`${BASE}${path}`);
-  if (!res.ok) throw new Error(`Quran API ${res.status}`);
+  const res = await fetch(fullUrl);
+  if (!res.ok) throw new Error(`API error ${res.status}`);
   const data = await res.json();
-  cache.set(path, data);
+  cache.set(fullUrl, data);
   if (typeof window !== "undefined") {
     try {
       localStorage.setItem(lsKey, JSON.stringify(data));
@@ -210,3 +211,65 @@ export async function searchVerses(query: string): Promise<
     return [];
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// mp3quran.net API Integration (Gapless Audio)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type Mp3QuranReciter = {
+  id: number;
+  name: string;
+  rewaya: string;
+  folder_url: string;
+  soar_count: number;
+  soar_link: string;
+};
+
+// Known popular reciter IDs on mp3quran to boost to the top
+const POPULAR_MP3QURAN_IDS = [
+  123, // Mishary Alafasy
+  54,  // Abdur-Rahman As-Sudais
+  118, // Mahmoud Khalil Al-Husary
+  53,  // AbdulBaset AbdulSamad
+  112, // Mohamed Siddiq al-Minshawi
+  92,  // Yasser Al-Dossary
+  133, // Maher Al-Muaiqly
+  30,  // Saad Al-Ghamdi
+  5,   // Ahmed Al-Ajamy
+  20,  // Khalid Al-Jalil
+  81,  // Fares Abbad
+  86,  // Nasser Al-Qatami
+];
+
+export async function getMp3QuranReciters(): Promise<Mp3QuranReciter[]> {
+  try {
+    const data = await fetchJson<Mp3QuranReciter[]>("/ayat_timing/reads", "https://www.mp3quran.net/api/v3");
+    // Sort so that popular ones are at the top
+    return data.sort((a, b) => {
+      const aIndex = POPULAR_MP3QURAN_IDS.indexOf(a.id);
+      const bIndex = POPULAR_MP3QURAN_IDS.indexOf(b.id);
+      if (aIndex !== -1 && bIndex !== -1) return aIndex - bIndex;
+      if (aIndex !== -1) return -1;
+      if (bIndex !== -1) return 1;
+      return a.name.localeCompare(b.name, "ar");
+    });
+  } catch {
+    return [];
+  }
+}
+
+export type AyahTiming = {
+  ayah: number;
+  start_time: number;
+  end_time: number;
+};
+
+export async function getAyahTimings(surahId: number, readId: number): Promise<AyahTiming[]> {
+  try {
+    const data = await fetchJson<AyahTiming[]>(`/ayat_timing?surah=${surahId}&read=${readId}`, "https://www.mp3quran.net/api/v3");
+    return data;
+  } catch {
+    return [];
+  }
+}
+

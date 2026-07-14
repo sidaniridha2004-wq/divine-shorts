@@ -50,7 +50,7 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   chapterName: "Ya-Sin",
   fromAyah: 1,
   toAyah: 3,
-  reciterId: 7,
+  reciterId: 123,
   audioSpeed: 1,
   fadeIn: true,
   fadeOut: true,

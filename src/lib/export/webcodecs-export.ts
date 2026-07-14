@@ -130,7 +130,16 @@ export async function exportVideo(
   // Play audio elements
   reciterEl.currentTime = segments[0].absoluteStart;
   reciterEl.playbackRate = audioSpeed;
+  
+  const playPromise = new Promise<void>((resolve) => {
+    if (reciterEl.readyState >= 3) resolve();
+    else reciterEl.addEventListener("playing", () => resolve(), { once: true });
+    // fallback timeout just in case
+    setTimeout(resolve, 2000);
+  });
+  
   await reciterEl.play().catch(console.warn);
+  await playPromise;
   
   if (ambientEl) {
     ambientEl.currentTime = 0;
@@ -156,9 +165,12 @@ export async function exportVideo(
     videoEncoder.encode(frame);
     frame.close();
 
-    if (i % 10 === 0) {
+    // Yield more frequently and explicitly to prevent starving the audio thread and causing dropouts
+    if (i % 5 === 0) {
       const p = 0.05 + (i / totalFrames) * 0.8;
       onProgress({ phase: "encoding", progress: p, message: "Encoding Video..." });
+      await new Promise((r) => setTimeout(r, 5));
+    } else {
       await new Promise((r) => setTimeout(r, 0));
     }
   }

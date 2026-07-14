@@ -27,6 +27,7 @@ export interface PreviewHandle {
   getCurrentTime: () => number;
   drawFrame: (t: number) => Promise<void>;
   muteSpeakers: (muted: boolean) => void;
+  captureThumbnail: () => Promise<string | null>;
 }
 
 type Segment = { verse_key: string; start: number; duration: number; absoluteStart: number; absoluteEnd: number };
@@ -516,6 +517,38 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
               }
           }
           draw(clamped, idx);
+        },
+        captureThumbnail: async () => {
+          if (!segments.length) return null;
+          const thumbTime = Math.min(0.5, duration / 2);
+          const clamped = Math.max(0, Math.min(thumbTime, duration));
+          const targetAbsTime = segments[0]?.absoluteStart + clamped;
+          let idx = segments.findIndex(sg => targetAbsTime >= sg.absoluteStart && targetAbsTime < sg.absoluteEnd);
+          if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
+          
+          if (videoRef.current instanceof HTMLVideoElement) {
+            const v = videoRef.current;
+            if (v.readyState > 0) {
+              v.currentTime = clamped % v.duration;
+              await new Promise<void>(r => {
+                let fired = false;
+                const done = () => { if (!fired) { fired = true; r(); } };
+                v.addEventListener("seeked", () => {
+                  if ('requestVideoFrameCallback' in v) {
+                    (v as any).requestVideoFrameCallback(done);
+                  } else {
+                    done();
+                  }
+                }, { once: true });
+                setTimeout(done, 1500);
+              });
+            }
+          }
+          draw(clamped, idx);
+          
+          const canvas = canvasRef.current;
+          if (!canvas) return null;
+          return canvas.toDataURL("image/jpeg", 0.9);
         }
       }),
       [segments, duration, settings.audioSpeed, playing, draw],

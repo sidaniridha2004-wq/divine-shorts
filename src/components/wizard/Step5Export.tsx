@@ -1,19 +1,43 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useProjectState } from "@/lib/project-state";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { exportVideo, type ExportProgress } from "@/lib/export/webcodecs-export";
 import { saveProject } from "@/lib/projects-store";
 import { buildCaption } from "@/lib/caption";
+import { getMp3QuranReciters } from "@/lib/quran-api";
+import { generateMetadata, LANGUAGES, type LanguageCode } from "@/lib/metadata-generator";
 import { toast } from "sonner";
-import { Download, Save, Copy, Share2, Loader2 } from "lucide-react";
+import { Download, Save, Copy, Share2, Loader2, Image as ImageIcon } from "lucide-react";
 import type { PreviewHandle } from "@/components/wizard/PreviewCanvas";
 
 export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandle | null> }) {
   const { settings } = useProjectState();
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [output, setOutput] = useState<{ url: string; ext: string } | null>(null);
+  
+  // YouTube Metadata State
+  const [language, setLanguage] = useState<LanguageCode>("en");
+  const [reciterName, setReciterName] = useState("Unknown Reciter");
+  
+  useEffect(() => {
+    getMp3QuranReciters().then(reciters => {
+      const found = reciters.find(r => r.id === settings.reciterId);
+      if (found) setReciterName(found.name);
+    }).catch(console.error);
+  }, [settings.reciterId]);
+
+  const metadata = generateMetadata(
+    language,
+    settings.chapterName,
+    reciterName,
+    settings.fromAyah,
+    settings.toAyah
+  );
 
   const doExport = async () => {
     if (!preview.current) return;
@@ -58,6 +82,20 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
     const url = `${window.location.origin}/create?p=${encoded}`;
     await navigator.clipboard.writeText(url);
     toast.success("Preview link copied");
+  };
+
+  const downloadThumbnail = async () => {
+    if (!preview.current) return;
+    const dataUrl = await preview.current.captureThumbnail();
+    if (!dataUrl) {
+      toast.error("Could not capture thumbnail");
+      return;
+    }
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = `thumbnail-${settings.chapterId}-${settings.fromAyah}.jpg`;
+    a.click();
+    toast.success("Thumbnail downloaded");
   };
 
   return (
@@ -120,12 +158,89 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
         </div>
       </div>
 
+      <div className="rounded-lg border border-border bg-card p-4">
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <div className="text-sm font-medium">YouTube Assets</div>
+            <p className="text-xs text-muted-foreground">Generate localized metadata and thumbnail</p>
+          </div>
+          <Select value={language} onValueChange={(v) => setLanguage(v as LanguageCode)}>
+            <SelectTrigger className="w-[140px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {LANGUAGES.map((l) => (
+                <SelectItem key={l.code} value={l.code}>
+                  {l.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <Label className="mb-1 block text-xs">Title</Label>
+            <div className="flex gap-2">
+              <Input readOnly value={metadata.title} />
+              <Button
+                variant="secondary"
+                size="icon"
+                onClick={() => {
+                  navigator.clipboard.writeText(metadata.title);
+                  toast.success("Title copied");
+                }}
+              >
+                <Copy className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+          <div>
+            <Label className="mb-1 block text-xs">Description</Label>
+            <div className="relative">
+              <Textarea readOnly value={metadata.description} rows={5} className="resize-none pr-10" />
+              <Button
+                variant="secondary"
+                size="icon"
+                className="absolute right-2 top-2 h-8 w-8"
+                onClick={() => {
+                  navigator.clipboard.writeText(metadata.description);
+                  toast.success("Description copied");
+                }}
+              >
+                <Copy className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+          <div>
+            <Label className="mb-1 block text-xs">Tags</Label>
+            <div className="flex gap-2">
+              <Input readOnly value={metadata.tags} />
+              <Button
+                variant="secondary"
+                size="icon"
+                onClick={() => {
+                  navigator.clipboard.writeText(metadata.tags);
+                  toast.success("Tags copied");
+                }}
+              >
+                <Copy className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+          
+          <Button onClick={downloadThumbnail} variant="outline" className="w-full">
+            <ImageIcon className="mr-2 h-4 w-4" /> Download Thumbnail
+          </Button>
+        </div>
+      </div>
+
       <div className="flex flex-wrap gap-2">
         <Button variant="outline" onClick={doSave}>
           <Save className="mr-2 h-4 w-4" /> Save to My Projects
         </Button>
         <Button variant="outline" onClick={copyCaption}>
-          <Copy className="mr-2 h-4 w-4" /> Copy caption
+          <Copy className="mr-2 h-4 w-4" /> Copy short caption
         </Button>
         <Button variant="outline" onClick={shareLink}>
           <Share2 className="mr-2 h-4 w-4" /> Share preview link

@@ -173,11 +173,14 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         }
 
         const baseOffset = filtered[0].start_time / 1000;
-        const totalDuration = (filtered[filtered.length - 1].end_time / 1000) - baseOffset;
+        const PADDING = 1.5;
+        const totalDuration = (filtered[filtered.length - 1].end_time / 1000) - baseOffset + PADDING;
 
-        const newSegments = filtered.map(t => {
+        const newSegments = filtered.map((t, idx) => {
           const absStart = t.start_time / 1000;
-          const absEnd = t.end_time / 1000;
+          let absEnd = t.end_time / 1000;
+          if (idx === filtered.length - 1) absEnd += PADDING;
+          
           return {
             verse_key: `${settings.chapterId}:${t.ayah}`,
             start: absStart - baseOffset,
@@ -359,7 +362,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           const last = segments[segments.length - 1];
           const cTime = reciterAudioRef.current.currentTime;
           
-          t = (cTime - first.absoluteStart) / settings.audioSpeed;
+          t = cTime - first.absoluteStart;
 
           // Stop if reached the end of the last segment
           if (cTime >= last.absoluteEnd) {
@@ -409,7 +412,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           const t = localTimeRef.current;
           const resuming = t > 0.05 && t < duration - 0.05;
           if (resuming) {
-            resumeTime = first.absoluteStart + (t * settings.audioSpeed);
+            resumeTime = first.absoluteStart + t;
           } else {
             localTimeRef.current = 0;
             currentSegIdxRef.current = 0;
@@ -435,7 +438,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           }
           
           localTimeRef.current = clamped;
-          const targetAbsTime = segments[0].absoluteStart + (clamped * settings.audioSpeed);
+          const targetAbsTime = segments[0].absoluteStart + clamped;
           
           if (reciterAudioRef.current) {
             reciterAudioRef.current.currentTime = targetAbsTime;
@@ -445,7 +448,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
           currentSegIdxRef.current = idx;
         },
-        getDuration: () => duration,
+        getDuration: () => duration / settings.audioSpeed,
         getCanvas: () => canvasRef.current,
         getAudioElement: () => ambientRef.current,
         getAudioElements: () => [ambientRef.current].filter(Boolean) as HTMLAudioElement[],

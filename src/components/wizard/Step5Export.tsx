@@ -3,7 +3,7 @@ import { useProjectState } from "@/lib/project-state";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { exportVideo, type ExportProgress } from "@/lib/export/mediarecorder-export";
+import { exportVideo, type ExportProgress } from "@/lib/export/webcodecs-export";
 import { saveProject } from "@/lib/projects-store";
 import { buildCaption } from "@/lib/caption";
 import { toast } from "sonner";
@@ -20,7 +20,7 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
     setOutput(null);
     setProgress({ phase: "preparing", progress: 0.02 });
     try {
-      const { blob, ext } = await exportVideo(preview.current, setProgress);
+      const { blob, ext } = await exportVideo(preview.current, setProgress, settings);
       const url = URL.createObjectURL(blob);
       setOutput({ url, ext });
       toast.success(`Exported as .${ext}`);

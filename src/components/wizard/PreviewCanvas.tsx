@@ -24,6 +24,7 @@ export type PreviewHandle = {
   getAudioDestination: () => MediaStreamAudioDestinationNode | null;
   getSegmentTimings: () => { verse_key: string; start: number; duration: number }[];
   getCurrentTime: () => number;
+  drawFrame: (t: number) => Promise<void>;
 };
 
 type Segment = { verse_key: string; start: number; duration: number; absoluteStart: number; absoluteEnd: number };
@@ -457,8 +458,31 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         getAudioDestination: () => getAudioDest(),
         getSegmentTimings: () => segments,
         getCurrentTime: () => localTimeRef.current,
+        drawFrame: async (t: number) => {
+          const clamped = Math.max(0, Math.min(t, duration));
+          const targetAbsTime = segments[0]?.absoluteStart + clamped;
+          let idx = segments.findIndex(sg => targetAbsTime >= sg.absoluteStart && targetAbsTime < sg.absoluteEnd);
+          if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
+          
+          if (videoRef.current instanceof HTMLVideoElement) {
+            const v = videoRef.current;
+            // Video background is essentially decorative. To prevent webcodecs deadlock,
+            // we will quickly seek it and wait for it to be ready.
+            if (v.readyState > 0) {
+              v.currentTime = clamped % v.duration;
+              // wait for seek to finish or timeout to prevent stalling
+              await new Promise<void>(r => {
+                let fired = false;
+                const done = () => { if (!fired) { fired = true; r(); } };
+                v.addEventListener("seeked", done, { once: true });
+                setTimeout(done, 100); // max 100ms wait
+              });
+            }
+          }
+          draw(clamped, idx);
+        }
       }),
-      [segments, duration, settings.audioSpeed, playing],
+      [segments, duration, settings.audioSpeed, playing, draw],
     );
 
     const { w, h } = getDims(settings);

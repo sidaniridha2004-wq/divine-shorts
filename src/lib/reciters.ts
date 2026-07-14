@@ -22,6 +22,8 @@ export const RECITER_ACCENTS = [
 ];
 
 // Arabic display names for known Quran.com recitation ids.
+// Arabic display names for known Quran.com recitation ids
+// and app-only ids (9000+) served from the everyayah.com CDN.
 export const ARABIC_NAMES: Record<number, string> = {
   1: "عبد الباسط عبد الصمد",
   2: "عبد الباسط عبد الصمد",
@@ -34,7 +36,23 @@ export const ARABIC_NAMES: Record<number, string> = {
   9: "محمد صديق المنشاوي",
   10: "سعود الشريم",
   12: "محمود خليل الحصري",
+  9001: "ياسر الدوسري",
+  9002: "ناصر القطامي",
+  9003: "ماهر المعيقلي",
+  9004: "أحمد بن علي العجمي",
+  9005: "صلاح البدير",
 };
+
+// App-only reciters served via the everyayah.com CDN. These are always
+// merged into the reciter list so users can pick them even when the
+// Quran.com API doesn't expose them (e.g. Yasser Al-Dossary).
+export const EVERYAYAH_RECITERS: Reciter[] = [
+  { id: 9001, name: "Yasser Al-Dossary", arabic: "ياسر الدوسري", style: "Murattal", accent: RECITER_ACCENTS[1], initials: "YD" },
+  { id: 9003, name: "Maher Al-Muaiqly", arabic: "ماهر المعيقلي", style: "Murattal", accent: RECITER_ACCENTS[2], initials: "MM" },
+  { id: 9002, name: "Nasser Al-Qatami", arabic: "ناصر القطامي", style: "Murattal", accent: RECITER_ACCENTS[3], initials: "NQ" },
+  { id: 9005, name: "Salah Al-Budair", arabic: "صلاح البدير", style: "Murattal", accent: RECITER_ACCENTS[4], initials: "SB" },
+  { id: 9004, name: "Ahmed Al-Ajamy", arabic: "أحمد بن علي العجمي", style: "Murattal", accent: RECITER_ACCENTS[5], initials: "AA" },
+];
 
 export function initialsOf(name: string): string {
   return name

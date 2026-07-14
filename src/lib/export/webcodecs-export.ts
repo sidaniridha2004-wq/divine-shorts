@@ -52,6 +52,7 @@ export async function exportVideo(
       numberOfChannels: numChannels,
     },
     firstTimestampBehavior: "offset",
+    fastStart: "in-memory",
   });
 
   const audioEncoder = new AudioEncoder({

@@ -4,6 +4,7 @@ import {
   AMBIENT_TRACKS,
   ARABIC_NAMES,
   RECITER_ACCENTS,
+  EVERYAYAH_RECITERS,
   initialsOf,
   type Reciter,
 } from "@/lib/reciters";

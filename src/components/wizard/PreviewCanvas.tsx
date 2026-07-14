@@ -111,6 +111,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
   function PreviewCanvas({ onProgress }, ref) {
     const { settings } = useProjectState();
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const videoRef = useRef<HTMLVideoElement | HTMLImageElement | null>(null);
     const reciterAudioRef = useRef<HTMLAudioElement>(null);
     const ambientRef = useRef<HTMLAudioElement>(null);
     const rafRef = useRef<number | null>(null);

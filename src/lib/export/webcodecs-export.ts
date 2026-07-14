@@ -20,7 +20,7 @@ export async function exportVideo(
   const [reciterEl, ambientEl] = preview.getAudioElements?.() || [];
   if (!reciterEl?.src) throw new Error("Reciter audio source not found");
 
-  const destNode = preview.getAudioDestination();
+  const destNode = preview.getMasterGain?.() || preview.getAudioDestination();
   const audioCtx = destNode.context as AudioContext;
   const sampleRate = audioCtx.sampleRate;
   const numChannels = 2; // WebAudio stereo

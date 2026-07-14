@@ -22,6 +22,7 @@ export interface PreviewHandle {
   getAudioElements: () => HTMLAudioElement[];
   getAudioContext: () => AudioContext | null;
   getAudioDestination: () => MediaStreamAudioDestinationNode | null;
+  getMasterGain: () => GainNode | null;
   getSegmentTimings: () => { verse_key: string; start: number; duration: number }[];
   getCurrentTime: () => number;
   drawFrame: (t: number) => Promise<void>;
@@ -465,6 +466,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         getAudioElements: () => [reciterAudioRef.current, ambientRef.current].filter(Boolean) as HTMLAudioElement[],
         getAudioContext: () => getAudioCtx(),
         getAudioDestination: () => getAudioDest(),
+        getMasterGain: () => getMasterGain(),
         getSegmentTimings: () => segments,
         getCurrentTime: () => localTimeRef.current,
         muteSpeakers: (muted: boolean) => setSpeakerMuted(muted),

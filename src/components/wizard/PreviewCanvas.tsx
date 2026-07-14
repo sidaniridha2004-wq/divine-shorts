@@ -23,6 +23,7 @@ export type PreviewHandle = {
   getAudioContext: () => AudioContext | null;
   getAudioDestination: () => MediaStreamAudioDestinationNode | null;
   getSegmentTimings: () => { verse_key: string; start: number; duration: number }[];
+  getCurrentTime: () => number;
 };
 
 type Segment = { verse_key: string; start: number; duration: number; absoluteStart: number; absoluteEnd: number };
@@ -455,6 +456,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         getAudioContext: () => getAudioCtx(),
         getAudioDestination: () => getAudioDest(),
         getSegmentTimings: () => segments,
+        getCurrentTime: () => localTimeRef.current,
       }),
       [segments, duration, settings.audioSpeed, playing],
     );

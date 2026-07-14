@@ -72,12 +72,17 @@ export async function exportVideo(
   const started = performance.now();
   await new Promise<void>((resolve) => {
     const iv = setInterval(() => {
-      const elapsed = (performance.now() - started) / 1000;
-      const p = Math.min(0.95, 0.1 + (elapsed / total) * 0.85);
+      const current = preview.getCurrentTime?.() ?? 0;
+      // Allow progress to slightly trail behind, reaching 95% near the end
+      const p = Math.min(0.95, 0.1 + (current / total) * 0.85);
       onProgress({ phase: "recording", progress: p });
-      if (elapsed >= total + 0.5) {
+      
+      // Stop when current time reaches the total duration (or if fallback elapsed time goes way over)
+      const fallbackElapsed = (performance.now() - started) / 1000;
+      if (current >= total || fallbackElapsed > total + 30) {
         clearInterval(iv);
-        resolve();
+        // Wait an extra 500ms to ensure the last frame/audio is flushed
+        setTimeout(resolve, 500);
       }
     }, 250);
   });

@@ -141,38 +141,53 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       };
     }, [settings.reciterId, settings.chapterId, settings.fromAyah, settings.toAyah, settings.audioSpeed]);
 
-    // Load background video
+    // Load background. We prefer the theme's poster image (Pexels image CDN
+    // sends CORS headers so it renders on the canvas). Then we try to upgrade
+    // to the looping video in the background — if it loads successfully with
+    // CORS, we swap it in; if not (Pexels video CDN often doesn't return
+    // CORS), we keep the image. Custom user uploads work as before.
     useEffect(() => {
       const theme = THEMES.find((t) => t.id === settings.themeId);
-      if (settings.customBg) {
-        if (settings.customBg.startsWith("data:video") || /\.(mp4|webm|mov)/i.test(settings.customBg)) {
-          const v = document.createElement("video");
-          v.src = settings.customBg;
-          v.crossOrigin = "anonymous";
-          v.muted = true;
-          v.loop = true;
-          v.playsInline = true;
-          videoRef.current = v;
-          v.play().catch(() => {});
-        } else {
-          const img = new Image();
-          img.crossOrigin = "anonymous";
-          img.src = settings.customBg;
-          (videoRef as any).current = img;
-        }
-      } else if (theme?.video) {
+      videoRef.current = null;
+
+      const loadImage = (src: string) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => {
+          // Only assign if still relevant (theme didn't change mid-load)
+          if (!videoRef.current || !(videoRef.current instanceof HTMLVideoElement)) {
+            (videoRef as any).current = img;
+          }
+        };
+        img.src = src;
+      };
+
+      const loadVideo = (src: string) => {
         const v = document.createElement("video");
-        v.src = theme.video;
         v.crossOrigin = "anonymous";
         v.muted = true;
         v.loop = true;
         v.playsInline = true;
-        videoRef.current = v;
-        v.play().catch(() => {});
-      } else {
-        videoRef.current = null;
+        v.onloadeddata = () => {
+          videoRef.current = v;
+          v.play().catch(() => {});
+        };
+        v.onerror = () => {}; // silently keep the image
+        v.src = src;
+      };
+
+      if (settings.customBg) {
+        if (settings.customBg.startsWith("data:video") || /\.(mp4|webm|mov)/i.test(settings.customBg)) {
+          loadVideo(settings.customBg);
+        } else {
+          loadImage(settings.customBg);
+        }
+      } else if (theme?.poster) {
+        loadImage(theme.poster);
+        if (theme.video) loadVideo(theme.video);
       }
     }, [settings.themeId, settings.customBg]);
+
 
     const draw = useCallback(
       (t: number, segIdx: number) => {

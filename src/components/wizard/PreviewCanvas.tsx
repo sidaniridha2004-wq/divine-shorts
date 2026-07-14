@@ -185,15 +185,16 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           canvas.width = w;
           canvas.height = h;
         }
-        // Background — prefer the video/image when it's actually loaded,
-        // otherwise fall back to the theme's generated gradient (so tiles
-        // and preview are never blank while a Pexels asset is loading or blocked).
+        // Background — prefer the theme's video/custom asset when it's
+        // actually loaded, otherwise fall back to the theme's generated
+        // gradient (so preview is never blank if a CDN asset is slow/blocked).
         const theme = THEMES.find((th) => th.id === settings.themeId);
         const v = videoRef.current as HTMLVideoElement | HTMLImageElement | null;
         const vw = ((v as any)?.videoWidth ?? (v as HTMLImageElement)?.naturalWidth ?? 0) as number;
         const vh = ((v as any)?.videoHeight ?? (v as HTMLImageElement)?.naturalHeight ?? 0) as number;
         const videoReady = !!v && vw > 0 && vh > 0;
-        if (videoReady && !(!settings.customBg && theme && !theme.video && theme.generated)) {
+        const wantsVideo = !!settings.customBg || !!theme?.video;
+        if (wantsVideo && videoReady) {
           try {
             const scale = Math.max(w / vw, h / vh) * (settings.kenBurns ? 1 + Math.sin(t * 0.05) * 0.05 + 0.05 : 1);
             const dw = vw * scale;

@@ -12,7 +12,7 @@ import { ARABIC_FONTS } from "@/lib/translations";
 import { getVersesByChapter, getAyahTimings, getMp3QuranReciters, type Verse } from "@/lib/quran-api";
 import { AMBIENT_TRACKS } from "@/lib/reciters";
 
-export type PreviewHandle = {
+export interface PreviewHandle {
   play: () => Promise<void>;
   pause: () => void;
   seek: (t: number) => void;
@@ -25,7 +25,8 @@ export type PreviewHandle = {
   getSegmentTimings: () => { verse_key: string; start: number; duration: number }[];
   getCurrentTime: () => number;
   drawFrame: (t: number) => Promise<void>;
-};
+  muteSpeakers: (muted: boolean) => void;
+}
 
 type Segment = { verse_key: string; start: number; duration: number; absoluteStart: number; absoluteEnd: number };
 
@@ -46,13 +47,18 @@ function getDims(s: ProjectSettings) {
 let _audioCtx: AudioContext | null = null;
 let _audioDest: MediaStreamAudioDestinationNode | null = null;
 let _masterGain: GainNode | null = null;
+let _speakerGain: GainNode | null = null;
 
 function getAudioCtx(): AudioContext {
   if (!_audioCtx) {
     _audioCtx = new AudioContext();
     _audioDest = _audioCtx.createMediaStreamDestination();
     _masterGain = _audioCtx.createGain();
-    _masterGain.connect(_audioCtx.destination);
+    _speakerGain = _audioCtx.createGain();
+    
+    _masterGain.connect(_speakerGain);
+    _speakerGain.connect(_audioCtx.destination);
+    
     _masterGain.connect(_audioDest);
   }
   if (_audioCtx.state === "suspended") _audioCtx.resume().catch(() => {});
@@ -60,6 +66,9 @@ function getAudioCtx(): AudioContext {
 }
 function getAudioDest() { getAudioCtx(); return _audioDest!; }
 function getMasterGain() { getAudioCtx(); return _masterGain!; }
+function setSpeakerMuted(muted: boolean) {
+  if (_speakerGain) _speakerGain.gain.value = muted ? 0 : 1;
+}
 
 // ── Duration probing (fallback) ─────────────────────────────────────────
 function probeDuration(url: string): Promise<number | null> {
@@ -453,11 +462,12 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         getDuration: () => duration / settings.audioSpeed,
         getCanvas: () => canvasRef.current,
         getAudioElement: () => ambientRef.current,
-        getAudioElements: () => [ambientRef.current].filter(Boolean) as HTMLAudioElement[],
+        getAudioElements: () => [reciterAudioRef.current, ambientRef.current].filter(Boolean) as HTMLAudioElement[],
         getAudioContext: () => getAudioCtx(),
         getAudioDestination: () => getAudioDest(),
         getSegmentTimings: () => segments,
         getCurrentTime: () => localTimeRef.current,
+        muteSpeakers: (muted: boolean) => setSpeakerMuted(muted),
         drawFrame: async (t: number) => {
           const clamped = Math.max(0, Math.min(t, duration));
           const targetAbsTime = segments[0]?.absoluteStart + clamped;

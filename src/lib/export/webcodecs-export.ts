@@ -8,104 +8,6 @@ export type ExportProgress = {
   message?: string;
 };
 
-async function fetchAudioRange(url: string, startSec: number, endSec: number, totalDuration: number): Promise<{ buffer: ArrayBuffer, actualStartSec: number }> {
-  try {
-    // 1. Fetch first 10 bytes to read ID3v2 header size
-    const headRes = await fetch(url, { headers: { Range: "bytes=0-9" } });
-    if (!headRes.ok) throw new Error("Range not supported");
-    
-    const headBuf = await headRes.arrayBuffer();
-    const view = new Uint8Array(headBuf);
-    let id3Size = 0;
-    if (view.length >= 10 && view[0] === 0x49 && view[1] === 0x44 && view[2] === 0x33) {
-      id3Size = (view[6] << 21) | (view[7] << 14) | (view[8] << 7) | view[9];
-      id3Size += 10;
-    }
-
-    // 2. Fetch full file size
-    const fullHead = await fetch(url, { method: "HEAD" });
-    const contentLength = Number(fullHead.headers.get("Content-Length"));
-    
-    if (contentLength && contentLength > 0 && totalDuration > 0) {
-      const audioBytes = contentLength - id3Size;
-      const bytesPerSec = audioBytes / totalDuration;
-      
-      // generous padding to account for CBR inaccuracies
-      const pad = 15; 
-      const fetchStartSec = Math.max(0, startSec - pad);
-      const fetchEndSec = Math.min(totalDuration, endSec + pad);
-      
-      const startByte = id3Size + Math.floor(fetchStartSec * bytesPerSec);
-      const endByte = Math.min(contentLength - 1, id3Size + Math.ceil(fetchEndSec * bytesPerSec));
-      
-      const res = await fetch(url, {
-        headers: { Range: `bytes=${startByte}-${endByte}` }
-      });
-      
-      if (res.status === 206) {
-        return {
-          buffer: await res.arrayBuffer(),
-          actualStartSec: fetchStartSec
-        };
-      }
-    }
-  } catch (e) {
-    console.warn("Range request failed, falling back to full fetch", e);
-  }
-
-  // Fallback to full fetch
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Failed to fetch audio: ${url}`);
-  return { buffer: await res.arrayBuffer(), actualStartSec: 0 };
-}
-async function mixAudio(
-  reciterUrl: string,
-  startSec: number,
-  endSec: number,
-  totalDuration: number,
-  audioSpeed: number,
-  ambientUrl?: string,
-): Promise<AudioBuffer> {
-  const duration = endSec - startSec;
-  const realDuration = duration / audioSpeed;
-  const sampleRate = 44100;
-  
-  const ctx = new OfflineAudioContext(2, Math.ceil(sampleRate * realDuration), sampleRate);
-
-  const { buffer, actualStartSec } = await fetchAudioRange(reciterUrl, startSec, endSec, totalDuration);
-  const recBuf = await ctx.decodeAudioData(buffer);
-  
-  const recNode = ctx.createBufferSource();
-  recNode.buffer = recBuf;
-  recNode.playbackRate.value = audioSpeed;
-  recNode.connect(ctx.destination);
-  
-  // start(when, offset)
-  // The decoded buffer starts at `actualStartSec`.
-  // We want to extract audio starting from `startSec`.
-  const offsetInBuffer = startSec - actualStartSec;
-  recNode.start(0, Math.max(0, offsetInBuffer));
-
-  if (ambientUrl) {
-    try {
-      const ambRes = await fetch(ambientUrl);
-      const ambBuf = await ctx.decodeAudioData(await ambRes.arrayBuffer());
-      const ambNode = ctx.createBufferSource();
-      ambNode.buffer = ambBuf;
-      ambNode.loop = true;
-      const ambGain = ctx.createGain();
-      // Apply the same 0.15 gain used in PreviewCanvas
-      ambGain.gain.value = 0.15;
-      ambNode.connect(ambGain).connect(ctx.destination);
-      ambNode.start(0);
-    } catch (e) {
-      console.warn("Ambient audio failed to load during export", e);
-    }
-  }
-
-  return await ctx.startRendering();
-}
-
 export async function exportVideo(
   preview: PreviewHandle,
   onProgress: (p: ExportProgress) => void,
@@ -115,24 +17,26 @@ export async function exportVideo(
   const segments = preview.getSegmentTimings();
   if (!canvas || !segments.length) throw new Error("Preview not ready");
 
-  onProgress({ phase: "preparing", progress: 0.05, message: "Processing Audio..." });
-
   const [reciterEl, ambientEl] = preview.getAudioElements?.() || [];
   if (!reciterEl?.src) throw new Error("Reciter audio source not found");
 
+  const destNode = preview.getAudioDestination();
+  const audioCtx = destNode.context as AudioContext;
+  const sampleRate = audioCtx.sampleRate;
+  const numChannels = 2; // WebAudio stereo
+
+  if (audioCtx.state === "suspended") {
+    await audioCtx.resume();
+  }
+
+  // Mute speakers so the user doesn't hear the high-speed/real-time export audio
+  preview.muteSpeakers?.(true);
+
+  onProgress({ phase: "preparing", progress: 0.05, message: "Setting up encoders..." });
+
   const audioSpeed = settings.audioSpeed ?? 1;
-  const duration = preview.getDuration() * audioSpeed; // getDuration returns real duration, we want logical duration
-
-  const mixedAudio = await mixAudio(
-    reciterEl.src,
-    segments[0].absoluteStart,
-    segments[segments.length - 1].absoluteEnd,
-    reciterEl.duration,
-    audioSpeed,
-    ambientEl?.src
-  );
-
-  onProgress({ phase: "encoding", progress: 0.15, message: "Encoding Video..." });
+  const duration = preview.getDuration() * audioSpeed; 
+  const realDuration = duration / audioSpeed;
 
   const target = new ArrayBufferTarget();
   const muxer = new Muxer({
@@ -144,8 +48,8 @@ export async function exportVideo(
     },
     audio: {
       codec: "aac",
-      sampleRate: mixedAudio.sampleRate,
-      numberOfChannels: mixedAudio.numberOfChannels,
+      sampleRate,
+      numberOfChannels: numChannels,
     },
     firstTimestampBehavior: "offset",
   });
@@ -157,41 +61,11 @@ export async function exportVideo(
   
   audioEncoder.configure({
     codec: "mp4a.40.2",
-    sampleRate: mixedAudio.sampleRate,
-    numberOfChannels: mixedAudio.numberOfChannels,
+    sampleRate,
+    numberOfChannels: numChannels,
     bitrate: 128_000,
   });
 
-  // Feed audio chunks
-  const sampleRate = mixedAudio.sampleRate;
-  const numChannels = mixedAudio.numberOfChannels;
-  const length = mixedAudio.length;
-  const chunkSize = sampleRate; // 1 second chunks
-
-  for (let start = 0; start < length; start += chunkSize) {
-    const end = Math.min(start + chunkSize, length);
-    const size = end - start;
-    const data = new Float32Array(size * numChannels);
-    
-    for (let c = 0; c < numChannels; c++) {
-      const channelData = mixedAudio.getChannelData(c);
-      data.set(channelData.subarray(start, end), c * size);
-    }
-
-    const audioData = new AudioData({
-      format: "f32-planar",
-      sampleRate,
-      numberOfFrames: size,
-      numberOfChannels: numChannels,
-      timestamp: (start / sampleRate) * 1e6,
-      data,
-    });
-    audioEncoder.encode(audioData);
-    audioData.close();
-  }
-  await audioEncoder.flush();
-
-  // Video Encoding
   const vWidth = canvas.width - (canvas.width % 2);
   const vHeight = canvas.height - (canvas.height % 2);
   
@@ -207,36 +81,101 @@ export async function exportVideo(
     framerate: 30,
   });
 
+  // Setup ScriptProcessor for Audio
+  const processor = audioCtx.createScriptProcessor(4096, numChannels, numChannels);
+  let audioTime = 0;
+  let finishedAudio = false;
+  
+  let audioResolve: () => void;
+  const audioPromise = new Promise<void>((r) => (audioResolve = r));
+
+  processor.onaudioprocess = (e) => {
+    if (finishedAudio) return;
+    
+    const left = e.inputBuffer.getChannelData(0);
+    const right = e.inputBuffer.getChannelData(1);
+    const size = left.length;
+    
+    const data = new Float32Array(size * 2);
+    data.set(left, 0);
+    data.set(right, size);
+
+    const audioData = new AudioData({
+      format: "f32-planar",
+      sampleRate,
+      numberOfFrames: size,
+      numberOfChannels: numChannels,
+      timestamp: Math.round(audioTime * 1e6),
+      data,
+    });
+    
+    audioEncoder.encode(audioData);
+    audioData.close();
+    
+    audioTime += size / sampleRate;
+    
+    if (audioTime >= realDuration) {
+      finishedAudio = true;
+      audioResolve();
+    }
+  };
+
+  destNode.connect(processor);
+  const silentGain = audioCtx.createGain();
+  silentGain.gain.value = 0;
+  processor.connect(silentGain);
+  silentGain.connect(audioCtx.destination);
+
+  // Play audio elements
+  reciterEl.currentTime = segments[0].absoluteStart;
+  reciterEl.playbackRate = audioSpeed;
+  await reciterEl.play().catch(console.warn);
+  
+  if (ambientEl) {
+    ambientEl.currentTime = 0;
+    await ambientEl.play().catch(console.warn);
+  }
+
+  // Video Encoding Loop
   const offscreen = new OffscreenCanvas(vWidth, vHeight);
   const offCtx = offscreen.getContext("2d")!;
   const fps = 30;
-  // Use realDuration for the number of frames
-  const realDuration = duration / audioSpeed;
   const totalFrames = Math.ceil(realDuration * fps);
 
   for (let i = 0; i < totalFrames; i++) {
-    // t is logical audio time!
-    // Since real frame time is i / fps, audio time is (i / fps) * audioSpeed
     const t = (i / fps) * audioSpeed;
     await preview.drawFrame(t);
     
     offCtx.drawImage(canvas, 0, 0, vWidth, vHeight);
     
     const frame = new VideoFrame(offscreen, {
-      timestamp: (i / fps) * 1e6,
+      timestamp: Math.round((i / fps) * 1e6),
     });
     
     videoEncoder.encode(frame);
     frame.close();
 
     if (i % 10 === 0) {
-      const p = 0.15 + (i / totalFrames) * 0.8;
+      const p = 0.05 + (i / totalFrames) * 0.8;
       onProgress({ phase: "encoding", progress: p, message: "Encoding Video..." });
       await new Promise((r) => setTimeout(r, 0));
     }
   }
 
   await videoEncoder.flush();
+  
+  onProgress({ phase: "encoding", progress: 0.90, message: "Finalizing audio (running in real-time)..." });
+  await audioPromise;
+
+  // Cleanup
+  reciterEl.pause();
+  if (ambientEl) ambientEl.pause();
+  preview.muteSpeakers?.(false);
+  processor.disconnect();
+  silentGain.disconnect();
+  destNode.disconnect(processor);
+
+  await audioEncoder.flush();
   muxer.finalize();
 
   const blob = new Blob([target.buffer], { type: "video/mp4" });

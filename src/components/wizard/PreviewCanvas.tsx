@@ -185,33 +185,33 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           canvas.width = w;
           canvas.height = h;
         }
-        // Background
+        // Background — prefer the video/image when it's actually loaded,
+        // otherwise fall back to the theme's generated gradient (so tiles
+        // and preview are never blank while a Pexels asset is loading or blocked).
         const theme = THEMES.find((th) => th.id === settings.themeId);
-        if (theme?.generated && !settings.customBg) {
-          drawGeneratedBg(ctx, theme.generated, w, h, t);
-        } else {
-          const v = videoRef.current as HTMLVideoElement | HTMLImageElement | null;
-          if (v) {
-            try {
-              // cover fit with optional Ken Burns
-              const vw = (v as any).videoWidth || (v as HTMLImageElement).naturalWidth || w;
-              const vh = (v as any).videoHeight || (v as HTMLImageElement).naturalHeight || h;
-              const scale = Math.max(w / vw, h / vh) * (settings.kenBurns ? 1 + Math.sin(t * 0.05) * 0.05 + 0.05 : 1);
-              const dw = vw * scale;
-              const dh = vh * scale;
-              const dx = (w - dw) / 2;
-              const dy = (h - dh) / 2;
-              if (settings.blur > 0) ctx.filter = `blur(${settings.blur}px)`;
-              ctx.drawImage(v as CanvasImageSource, dx, dy, dw, dh);
-              ctx.filter = "none";
-            } catch {
-              ctx.fillStyle = "#0B0F0E";
-              ctx.fillRect(0, 0, w, h);
-            }
-          } else {
+        const v = videoRef.current as HTMLVideoElement | HTMLImageElement | null;
+        const vw = ((v as any)?.videoWidth ?? (v as HTMLImageElement)?.naturalWidth ?? 0) as number;
+        const vh = ((v as any)?.videoHeight ?? (v as HTMLImageElement)?.naturalHeight ?? 0) as number;
+        const videoReady = !!v && vw > 0 && vh > 0;
+        if (videoReady && !(!settings.customBg && theme && !theme.video && theme.generated)) {
+          try {
+            const scale = Math.max(w / vw, h / vh) * (settings.kenBurns ? 1 + Math.sin(t * 0.05) * 0.05 + 0.05 : 1);
+            const dw = vw * scale;
+            const dh = vh * scale;
+            const dx = (w - dw) / 2;
+            const dy = (h - dh) / 2;
+            if (settings.blur > 0) ctx.filter = `blur(${settings.blur}px)`;
+            ctx.drawImage(v as CanvasImageSource, dx, dy, dw, dh);
+            ctx.filter = "none";
+          } catch {
             ctx.fillStyle = "#0B0F0E";
             ctx.fillRect(0, 0, w, h);
           }
+        } else if (theme?.generated && !settings.customBg) {
+          drawGeneratedBg(ctx, theme.generated, w, h, t);
+        } else {
+          ctx.fillStyle = "#0B0F0E";
+          ctx.fillRect(0, 0, w, h);
         }
         // Overlay darkness
         if (settings.overlayDarkness > 0) {

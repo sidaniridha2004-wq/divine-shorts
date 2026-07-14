@@ -185,7 +185,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         }
 
         const baseOffset = filtered[0].start_time / 1000;
-        const PADDING = 1.5;
+        const PADDING = 3.5; // Increased padding to prevent sound/video from cutting early
         const totalDuration = (filtered[filtered.length - 1].end_time / 1000) - baseOffset + PADDING;
 
         const newSegments = filtered.map((t, idx) => {
@@ -480,16 +480,23 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
             const v = videoRef.current;
             // Video background is essentially decorative. To prevent webcodecs deadlock,
             // we will quickly seek it and wait for it to be ready.
-            if (v.readyState > 0) {
-              v.currentTime = clamped % v.duration;
-              // wait for seek to finish or timeout to prevent stalling
-              await new Promise<void>(r => {
-                let fired = false;
-                const done = () => { if (!fired) { fired = true; r(); } };
-                v.addEventListener("seeked", done, { once: true });
-                setTimeout(done, 100); // max 100ms wait
-              });
-            }
+              if (v.readyState > 0) {
+                v.currentTime = clamped % v.duration;
+                // wait for seek to finish or timeout to prevent stalling
+                await new Promise<void>(r => {
+                  let fired = false;
+                  const done = () => { if (!fired) { fired = true; r(); } };
+                  v.addEventListener("seeked", () => {
+                    if ('requestVideoFrameCallback' in v) {
+                      // Ensure the frame is fully decoded and painted to prevent blurry intermediate frames
+                      (v as any).requestVideoFrameCallback(done);
+                    } else {
+                      done();
+                    }
+                  }, { once: true });
+                  setTimeout(done, 1500); // 1.5s timeout ensures we don't stall forever, but allows enough time for decoding
+                });
+              }
           }
           draw(clamped, idx);
         }

@@ -185,7 +185,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         }
 
         const baseOffset = filtered[0].start_time / 1000;
-        const PADDING = 3.5; // Increased padding to prevent sound/video from cutting early
+        const PADDING = 2.0; // 2s padding to give the video an outro, while audio fades out
         const totalDuration = (filtered[filtered.length - 1].end_time / 1000) - baseOffset + PADDING;
 
         const newSegments = filtered.map((t, idx) => {
@@ -418,6 +418,16 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
             reciterAudioRef.current.playbackRate = settings.audioSpeed;
           }
 
+          // Schedule audio fade-out for preview
+          const masterGain = getMasterGain();
+          const realDuration = duration / settings.audioSpeed;
+          masterGain.gain.cancelScheduledValues(ctx.currentTime);
+          masterGain.gain.setValueAtTime(1, ctx.currentTime);
+          if (realDuration > 1.0) {
+            masterGain.gain.setValueAtTime(1, ctx.currentTime + realDuration - 1.0);
+            masterGain.gain.linearRampToValueAtTime(0, ctx.currentTime + realDuration);
+          }
+
           const first = segments[0];
           let resumeTime = first.absoluteStart;
           
@@ -438,8 +448,15 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           setPlaying(true);
         },
         pause: () => {
+          if (rafRef.current) {
+            cancelAnimationFrame(rafRef.current);
+            rafRef.current = 0;
+          }
           reciterAudioRef.current?.pause();
           ambientRef.current?.pause();
+          const masterGain = getMasterGain();
+          masterGain.gain.cancelScheduledValues(getAudioCtx().currentTime);
+          masterGain.gain.value = 1;
           setPlaying(false);
         },
         seek: (t) => {

@@ -97,9 +97,20 @@ export async function exportVideo(
     const right = e.inputBuffer.getChannelData(1);
     const size = left.length;
     
+    // WebCodecs 'f32-planar' expects all left samples, then all right samples
     const data = new Float32Array(size * 2);
-    data.set(left, 0);
-    data.set(right, size);
+
+    const fadeDuration = 1.0;
+    for (let i = 0; i < size; i++) {
+        const currentSampleTime = audioTime + (i / sampleRate);
+        const timeRemaining = realDuration - currentSampleTime;
+        let fade = 1;
+        if (timeRemaining < fadeDuration) {
+            fade = Math.max(0, timeRemaining / fadeDuration);
+        }
+        data[i] = left[i] * fade;
+        data[size + i] = right[i] * fade;
+    }
 
     const audioData = new AudioData({
       format: "f32-planar",

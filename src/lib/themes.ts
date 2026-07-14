@@ -35,6 +35,7 @@ export const THEMES: Theme[] = [
     category: "nature",
     poster: "https://images.pexels.com/videos/2611250/free-video-2611250.jpg?auto=compress&w=640",
     video: "https://videos.pexels.com/video-files/2611250/2611250-uhd_2560_1440_30fps.mp4",
+    generated: { type: "gradient", from: "#0B1220", to: "#050810" },
   },
   {
     id: "ocean",
@@ -42,6 +43,7 @@ export const THEMES: Theme[] = [
     category: "nature",
     poster: "https://images.pexels.com/videos/1918465/free-video-1918465.jpg?auto=compress&w=640",
     video: "https://videos.pexels.com/video-files/1918465/1918465-hd_1920_1080_30fps.mp4",
+    generated: { type: "gradient", from: "#0B3D5C", to: "#031525" },
   },
   {
     id: "forest",
@@ -49,6 +51,7 @@ export const THEMES: Theme[] = [
     category: "nature",
     poster: "https://images.pexels.com/videos/1448735/free-video-1448735.jpg?auto=compress&w=640",
     video: "https://videos.pexels.com/video-files/1448735/1448735-hd_1920_1080_25fps.mp4",
+    generated: { type: "gradient", from: "#14311F", to: "#050B08" },
   },
   {
     id: "dunes",
@@ -56,6 +59,7 @@ export const THEMES: Theme[] = [
     category: "nature",
     poster: "https://images.pexels.com/videos/2098989/free-video-2098989.jpg?auto=compress&w=640",
     video: "https://videos.pexels.com/video-files/2098989/2098989-hd_1920_1080_30fps.mp4",
+    generated: { type: "gradient", from: "#8A5A2B", to: "#2A180A" },
   },
   {
     id: "snow",
@@ -63,6 +67,7 @@ export const THEMES: Theme[] = [
     category: "nature",
     poster: "https://images.pexels.com/videos/3373484/free-video-3373484.jpg?auto=compress&w=640",
     video: "https://videos.pexels.com/video-files/3373484/3373484-hd_1920_1080_25fps.mp4",
+    generated: { type: "gradient", from: "#2A3A55", to: "#0A121F" },
   },
   {
     id: "waterfall",
@@ -70,6 +75,7 @@ export const THEMES: Theme[] = [
     category: "nature",
     poster: "https://images.pexels.com/videos/2098988/free-video-2098988.jpg?auto=compress&w=640",
     video: "https://videos.pexels.com/video-files/2098988/2098988-hd_1920_1080_30fps.mp4",
+    generated: { type: "gradient", from: "#124A4D", to: "#04141A" },
   },
   {
     id: "mountain",
@@ -77,6 +83,7 @@ export const THEMES: Theme[] = [
     category: "nature",
     poster: "https://images.pexels.com/videos/1526909/free-video-1526909.jpg?auto=compress&w=640",
     video: "https://videos.pexels.com/video-files/1526909/1526909-hd_1920_1080_25fps.mp4",
+    generated: { type: "gradient", from: "#2E3B4A", to: "#0A1015" },
   },
   // ── Sky ─────────────────────────────────────────────────────────────
   {
@@ -85,6 +92,7 @@ export const THEMES: Theme[] = [
     category: "sky",
     poster: "https://images.pexels.com/videos/857195/free-video-857195.jpg?auto=compress&w=640",
     video: "https://videos.pexels.com/video-files/857195/857195-hd_1920_1080_30fps.mp4",
+    generated: { type: "particles", color: "#FFFFFF", bg: "#05070D" },
   },
   {
     id: "clouds",
@@ -92,6 +100,7 @@ export const THEMES: Theme[] = [
     category: "sky",
     poster: "https://images.pexels.com/videos/3115693/free-video-3115693.jpg?auto=compress&w=640",
     video: "https://videos.pexels.com/video-files/3115693/3115693-hd_1920_1080_30fps.mp4",
+    generated: { type: "gradient", from: "#4A6785", to: "#111A26" },
   },
   {
     id: "sunset",
@@ -99,6 +108,7 @@ export const THEMES: Theme[] = [
     category: "sky",
     poster: "https://images.pexels.com/videos/1580507/free-video-1580507.jpg?auto=compress&w=640",
     video: "https://videos.pexels.com/video-files/1580507/1580507-hd_1920_1080_30fps.mp4",
+    generated: { type: "gradient", from: "#B8621B", to: "#2A0F05" },
   },
   { id: "midnight", name: "Midnight Blue", category: "sky", poster: "", generated: { type: "gradient", from: "#050B14", to: "#12263A" } },
   { id: "aurora", name: "Aurora", category: "sky", poster: "", generated: { type: "gradient", from: "#06251B", to: "#3B1D5E" } },
@@ -111,6 +121,7 @@ export const THEMES: Theme[] = [
     category: "islamic",
     poster: "https://images.pexels.com/videos/8471985/pexels-photo-8471985.jpeg?auto=compress&w=640",
     video: "https://videos.pexels.com/video-files/8471985/8471985-uhd_2560_1440_25fps.mp4",
+    generated: { type: "gradient", from: "#3A2405", to: "#0B0F0E" },
   },
   {
     id: "kaaba",
@@ -118,6 +129,7 @@ export const THEMES: Theme[] = [
     category: "islamic",
     poster: "https://images.pexels.com/videos/7249384/pexels-photo-7249384.jpeg?auto=compress&w=640",
     video: "https://videos.pexels.com/video-files/7249384/7249384-hd_1920_1080_30fps.mp4",
+    generated: { type: "gradient", from: "#1A1208", to: "#050403" },
   },
   { id: "geometric-gold", name: "Gold Geometry", category: "islamic", poster: "", generated: { type: "pattern", fg: "#C9A227", bg: "#0B0F0E" } },
   { id: "geometric-emerald", name: "Emerald Geometry", category: "islamic", poster: "", generated: { type: "pattern", fg: "#2E9E6B", bg: "#06100B" } },
@@ -129,6 +141,7 @@ export const THEMES: Theme[] = [
     category: "abstract",
     poster: "https://images.pexels.com/videos/6466763/pexels-photo-6466763.jpeg?auto=compress&w=640",
     video: "https://videos.pexels.com/video-files/6466763/6466763-hd_1920_1080_25fps.mp4",
+    generated: { type: "gradient", from: "#4A2408", to: "#0B0704" },
   },
   { id: "gold-particles", name: "Gold Particles", category: "abstract", poster: "", generated: { type: "particles", color: "#C9A227", bg: "#0B0F0E" } },
   { id: "silver-particles", name: "Silver Dust", category: "abstract", poster: "", generated: { type: "particles", color: "#CBD5E1", bg: "#0B0B10" } },

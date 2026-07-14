@@ -121,13 +121,31 @@ export function Step3Text() {
         </div>
       </div>
 
-      <label className="flex items-center gap-2 text-sm">
-        <Switch
-          checked={settings.showTransliteration}
-          onCheckedChange={(v) => update({ showTransliteration: v })}
-        />
-        Show transliteration
-      </label>
+      <div className="flex flex-col gap-3">
+        <label className="flex items-center gap-2 text-sm">
+          <Switch
+            checked={settings.showTransliteration}
+            onCheckedChange={(v) => update({ showTransliteration: v })}
+          />
+          Show transliteration
+        </label>
+        
+        <label className="flex items-center gap-2 text-sm">
+          <Switch
+            checked={settings.showAyahNumber}
+            onCheckedChange={(v) => update({ showAyahNumber: v })}
+          />
+          Show Ayah number ﴿١﴾
+        </label>
+        
+        <label className="flex items-center gap-2 text-sm">
+          <Switch
+            checked={settings.encloseInBrackets}
+            onCheckedChange={(v) => update({ encloseInBrackets: v })}
+          />
+          Enclose in ornate brackets ﴿ ﴾
+        </label>
+      </div>
 
       <div>
         <Label className="mb-2 block">Layout</Label>

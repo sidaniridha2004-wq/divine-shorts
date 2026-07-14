@@ -681,7 +681,15 @@ function drawText(
     : undefined;
   const currentVerse =
     (seg && selected.find((v) => v.verse_key === seg.verse_key)) ?? selected[0];
-  const arabic = currentVerse.text_uthmani;
+  let arabic = currentVerse.text_uthmani;
+  if (s.encloseInBrackets) {
+    arabic = `﴿ ${arabic} ﴾`;
+  }
+  if (s.showAyahNumber) {
+    const num = currentVerse.verse_number.toString().replace(/[0-9]/g, (w) => "٠١٢٣٤٥٦٧٨٩"[+w]);
+    arabic = `${arabic} ﴿${num}﴾`;
+  }
+
   const translation =
     currentVerse.translations?.[0]?.text?.replace(/<[^>]*>/g, "") ?? "";
 

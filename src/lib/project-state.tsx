@@ -21,6 +21,8 @@ export type ProjectSettings = {
   arabicSize: number;
   translationId: number | null;
   showTransliteration: boolean;
+  showAyahNumber: boolean;
+  encloseInBrackets: boolean;
   textColor: string;
   letterSpacing: number;
   lineHeight: number;
@@ -60,6 +62,8 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   arabicSize: 56,
   translationId: 20,
   showTransliteration: false,
+  showAyahNumber: true,
+  encloseInBrackets: false,
   textColor: "#F5F1E8",
   letterSpacing: 0,
   lineHeight: 1.9,

@@ -306,10 +306,29 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
       };
     }, [draw, playing, duration, onProgress, segments, settings.audioSpeed]);
 
-    // Sequence audio segments strictly via the 'ended' event
+    // Seamless ayah transitions: preload the next segment while the current
+    // one is still playing, then swap on 'ended' with zero re-buffering.
+    // A hidden warm-up audio element preloads next.url; on 'ended' we simply
+    // point the main <audio> at that URL — the browser already has it buffered.
     useEffect(() => {
       const audio = audioRef.current;
       if (!audio) return;
+      const preloader = new Audio();
+      preloader.preload = "auto";
+      preloader.crossOrigin = "anonymous";
+
+      const preloadNext = () => {
+        const nextIdx = currentSegIdxRef.current + 1;
+        const next = segments[nextIdx];
+        if (next && preloader.src !== next.url) {
+          preloader.src = next.url;
+          try {
+            preloader.load();
+          } catch {}
+        }
+      };
+
+      const onLoaded = () => preloadNext();
       const onEnded = () => {
         const nextIdx = currentSegIdxRef.current + 1;
         if (nextIdx < segments.length) {
@@ -318,17 +337,27 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           localTimeRef.current = next.start;
           audio.src = next.url;
           audio.playbackRate = settings.audioSpeed;
+          // Start immediately — the preloader has already buffered this URL
           audio.play().catch(() => {});
+          // Warm up the ayah after that
+          setTimeout(preloadNext, 0);
         } else {
-          // Finished: clean reset so the next play starts from the beginning
           setPlaying(false);
           currentSegIdxRef.current = 0;
           localTimeRef.current = 0;
         }
       };
+      audio.addEventListener("loadeddata", onLoaded);
       audio.addEventListener("ended", onEnded);
-      return () => audio.removeEventListener("ended", onEnded);
+      // Prime once so the second ayah is already buffered by the time the first ends
+      preloadNext();
+      return () => {
+        audio.removeEventListener("loadeddata", onLoaded);
+        audio.removeEventListener("ended", onEnded);
+        preloader.src = "";
+      };
     }, [segments, settings.audioSpeed]);
+
 
     useImperativeHandle(
       ref,

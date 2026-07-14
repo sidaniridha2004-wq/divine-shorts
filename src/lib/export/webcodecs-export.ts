@@ -157,6 +157,15 @@ export async function exportVideo(
     await ambientEl.play().catch(console.warn);
   }
 
+  onProgress({ phase: "encoding", progress: 0.1, message: "Recording audio (guaranteeing clarity)..." });
+  await audioPromise;
+  
+  // Cleanup audio
+  reciterEl.pause();
+  if (ambientEl) ambientEl.pause();
+  silentGain.disconnect();
+  destNode.disconnect(processor);
+
   // Video Encoding Loop
   const offscreen = new OffscreenCanvas(vWidth, vHeight);
   const offCtx = offscreen.getContext("2d")!;
@@ -176,9 +185,9 @@ export async function exportVideo(
     videoEncoder.encode(frame);
     frame.close();
 
-    // Yield more frequently and explicitly to prevent starving the audio thread and causing dropouts
-    if (i % 5 === 0) {
-      const p = 0.05 + (i / totalFrames) * 0.8;
+    // Yield to allow main thread to process (since audio is done, we can just yield briefly)
+    if (i % 15 === 0) {
+      const p = 0.3 + (i / totalFrames) * 0.6;
       onProgress({ phase: "encoding", progress: p, message: "Encoding Video..." });
       await new Promise((r) => setTimeout(r, 5));
     } else {
@@ -186,21 +195,14 @@ export async function exportVideo(
     }
   }
 
-  await videoEncoder.flush();
-  
-  onProgress({ phase: "encoding", progress: 0.90, message: "Finalizing audio (running in real-time)..." });
-  await audioPromise;
+    onProgress({ phase: "encoding", progress: 0.95, message: "Finalizing MP4..." });
 
-  // Cleanup
-  reciterEl.pause();
-  if (ambientEl) ambientEl.pause();
+    await videoEncoder.flush();
+    await audioEncoder.flush();
+    muxer.finalize();
+
   preview.muteSpeakers?.(false);
   processor.disconnect();
-  silentGain.disconnect();
-  destNode.disconnect(processor);
-
-  await audioEncoder.flush();
-  muxer.finalize();
 
   const blob = new Blob([target.buffer], { type: "video/mp4" });
   onProgress({ phase: "done", progress: 1, message: "Complete" });

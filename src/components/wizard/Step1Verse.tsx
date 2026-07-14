@@ -13,6 +13,15 @@ export function Step1Verse() {
   const [search, setSearch] = useState<{ verse_key: string; text: string; translation: string }[]>([]);
   const [preview, setPreview] = useState<{ arabic: string; translation: string }>({ arabic: "", translation: "" });
   const [maxAyah, setMaxAyah] = useState(286);
+  
+  // Local state for inputs to allow empty values during typing
+  const [localFrom, setLocalFrom] = useState(settings.fromAyah.toString());
+  const [localTo, setLocalTo] = useState(settings.toAyah.toString());
+
+  useEffect(() => {
+    setLocalFrom(settings.fromAyah.toString());
+    setLocalTo(settings.toAyah.toString());
+  }, [settings.fromAyah, settings.toAyah]);
 
   useEffect(() => {
     getChapters().then(setChapters).catch(() => toast.error("Couldn't load surah list"));
@@ -120,10 +129,14 @@ export function Step1Verse() {
             type="number"
             min={1}
             max={maxAyah}
-            value={settings.fromAyah}
-            onChange={(e) =>
-              update({ fromAyah: Math.max(1, Math.min(maxAyah, Number(e.target.value) || 1)) })
-            }
+            value={localFrom}
+            onChange={(e) => setLocalFrom(e.target.value)}
+            onBlur={() => {
+              const val = parseInt(localFrom, 10);
+              const clamped = isNaN(val) ? 1 : Math.max(1, Math.min(maxAyah, val));
+              setLocalFrom(clamped.toString());
+              update({ fromAyah: clamped });
+            }}
           />
         </div>
         <div>
@@ -132,12 +145,14 @@ export function Step1Verse() {
             type="number"
             min={settings.fromAyah}
             max={maxAyah}
-            value={settings.toAyah}
-            onChange={(e) =>
-              update({
-                toAyah: Math.max(settings.fromAyah, Math.min(maxAyah, Number(e.target.value) || 1)),
-              })
-            }
+            value={localTo}
+            onChange={(e) => setLocalTo(e.target.value)}
+            onBlur={() => {
+              const val = parseInt(localTo, 10);
+              const clamped = isNaN(val) ? settings.fromAyah : Math.max(settings.fromAyah, Math.min(maxAyah, val));
+              setLocalTo(clamped.toString());
+              update({ toAyah: clamped });
+            }}
           />
         </div>
       </div>

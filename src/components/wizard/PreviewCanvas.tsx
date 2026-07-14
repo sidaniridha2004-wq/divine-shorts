@@ -557,13 +557,12 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
     const { w, h } = getDims(settings);
     return (
       <div
-        className="relative mx-auto flex h-full max-h-full items-center justify-center"
+        className="relative mx-auto flex h-full max-h-[40vh] items-center justify-center lg:max-h-[70vh]"
         style={{ aspectRatio: `${w} / ${h}` }}
       >
         <canvas
           ref={canvasRef}
           className="h-full w-full rounded-xl bg-black shadow-2xl"
-          style={{ maxHeight: "70vh" }}
           aria-label="Video preview"
         />
         <audio ref={reciterAudioRef} crossOrigin="anonymous" preload="auto" />

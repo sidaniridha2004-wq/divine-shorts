@@ -59,7 +59,7 @@ export function Step1Verse() {
   }, [q]);
 
   const ayahsCount = settings.toAyah - settings.fromAyah + 1;
-  const overLimit = ayahsCount > 10;
+  const overLimit = ayahsCount > 50;
 
   return (
     <div className="space-y-6">
@@ -159,7 +159,7 @@ export function Step1Verse() {
 
       {overLimit && (
         <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-200">
-          Videos are limited to 10 ayahs — reduce the range for best results.
+          Exporting more than 50 ayahs might take a long time to render in your browser.
         </p>
       )}
 

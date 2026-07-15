@@ -135,7 +135,7 @@ export function Step3Text() {
             checked={settings.showAyahNumber}
             onCheckedChange={(v) => update({ showAyahNumber: v })}
           />
-          Show Ayah number ﴿١﴾
+          Show Ayah number ﴾١﴿
         </label>
         
         <label className="flex items-center gap-2 text-sm">
@@ -143,7 +143,7 @@ export function Step3Text() {
             checked={settings.encloseInBrackets}
             onCheckedChange={(v) => update({ encloseInBrackets: v })}
           />
-          Enclose in ornate brackets ﴿ ﴾
+          Enclose in ornate brackets ﴾ ﴿
         </label>
       </div>
 

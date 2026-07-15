@@ -93,19 +93,6 @@ export async function exportVideo(
   processor.onaudioprocess = (e) => {
     if (finishedAudio) return;
     
-    // Fade out and stop the reciter so we don't bleed into the next ayah during padding
-    const lastSeg = segments[segments.length - 1];
-    const reciterPhysicalDuration = (lastSeg.start + lastSeg.duration) / audioSpeed;
-    const reciterRemaining = reciterPhysicalDuration - audioTime;
-    if (reciterRemaining <= 0) {
-      reciterEl.volume = 0;
-      reciterEl.pause();
-    } else if (reciterRemaining < 0.5) {
-      reciterEl.volume = Math.max(0, reciterRemaining / 0.5);
-    } else {
-      reciterEl.volume = 1;
-    }
-
     const left = e.inputBuffer.getChannelData(0);
     const right = e.inputBuffer.getChannelData(1);
     const size = left.length;
@@ -171,7 +158,21 @@ export async function exportVideo(
   });
 
   // Play audio elements
-  reciterEl.volume = 1;
+  const reciterGain = preview.getReciterGain?.();
+  if (reciterGain) {
+    const lastSeg = segments[segments.length - 1];
+    const reciterPhysicalDuration = (lastSeg.start + lastSeg.duration) / audioSpeed;
+    const now = audioCtx.currentTime;
+    reciterGain.gain.cancelScheduledValues(now);
+    reciterGain.gain.setValueAtTime(1, now);
+    if (reciterPhysicalDuration > 0.5) {
+      reciterGain.gain.setValueAtTime(1, now + reciterPhysicalDuration - 0.5);
+      reciterGain.gain.linearRampToValueAtTime(0, now + reciterPhysicalDuration);
+    } else {
+      reciterGain.gain.setValueAtTime(0, now + reciterPhysicalDuration);
+    }
+  }
+
   reciterEl.currentTime = segments[0].absoluteStart;
   reciterEl.playbackRate = audioSpeed;
   const p1 = waitAudioReady(reciterEl);

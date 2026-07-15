@@ -23,6 +23,7 @@ export interface PreviewHandle {
   getAudioContext: () => AudioContext | null;
   getAudioDestination: () => MediaStreamAudioDestinationNode | null;
   getMasterGain: () => GainNode | null;
+  getReciterGain: () => GainNode | null;
   getSegmentTimings: () => { verse_key: string; start: number; duration: number; absoluteStart: number; absoluteEnd: number }[];
   getCurrentTime: () => number;
   drawFrame: (t: number, isExporting?: boolean) => Promise<void>;
@@ -50,6 +51,7 @@ let _audioCtx: AudioContext | null = null;
 let _audioDest: MediaStreamAudioDestinationNode | null = null;
 let _masterGain: GainNode | null = null;
 let _speakerGain: GainNode | null = null;
+let _reciterGain: GainNode | null = null;
 
 function getAudioCtx(): AudioContext {
   if (!_audioCtx) {
@@ -57,6 +59,9 @@ function getAudioCtx(): AudioContext {
     _audioDest = _audioCtx.createMediaStreamDestination();
     _masterGain = _audioCtx.createGain();
     _speakerGain = _audioCtx.createGain();
+    _reciterGain = _audioCtx.createGain();
+    
+    _reciterGain.connect(_masterGain);
     
     _masterGain.connect(_speakerGain);
     _speakerGain.connect(_audioCtx.destination);
@@ -68,6 +73,7 @@ function getAudioCtx(): AudioContext {
 }
 function getAudioDest() { getAudioCtx(); return _audioDest!; }
 function getMasterGain() { getAudioCtx(); return _masterGain!; }
+function getReciterGain() { getAudioCtx(); return _reciterGain!; }
 function setSpeakerMuted(muted: boolean) {
   if (_speakerGain) _speakerGain.gain.value = muted ? 0 : 1;
 }
@@ -114,7 +120,7 @@ function connectReciterToCtx(el: HTMLAudioElement) {
   try {
     const ctx = getAudioCtx();
     const src = ctx.createMediaElementSource(el);
-    src.connect(getMasterGain());
+    src.connect(getReciterGain());
   } catch (e) {
     console.warn("reciter connect failed", e);
   }
@@ -485,6 +491,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         getAudioContext: () => getAudioCtx(),
         getAudioDestination: () => getAudioDest(),
         getMasterGain: () => getMasterGain(),
+        getReciterGain: () => getReciterGain(),
         getSegmentTimings: () => segments,
         getCurrentTime: () => localTimeRef.current,
         muteSpeakers: (muted: boolean) => setSpeakerMuted(muted),

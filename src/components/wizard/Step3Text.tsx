@@ -4,7 +4,6 @@ import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 export function Step3Text() {
   const { settings, update } = useProjectState();
@@ -140,16 +139,15 @@ export function Step3Text() {
         </label>
         <div className="flex flex-col gap-2 mt-2">
           <span className="text-sm font-medium">Ayah Number Style</span>
-          <Select value={settings.ayahNumberStyle} onValueChange={(v: any) => update({ ayahNumberStyle: v })}>
-            <SelectTrigger className="w-full h-8 text-sm">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="none">None</SelectItem>
-              <SelectItem value="bracket">Normal Brackets (1)</SelectItem>
-              <SelectItem value="ornate">Ornate Arabic ۝٣٥</SelectItem>
-            </SelectContent>
-          </Select>
+          <select 
+            className="h-8 w-full rounded-md border border-border bg-transparent px-3 text-sm"
+            value={settings.ayahNumberStyle || "none"} 
+            onChange={(e) => update({ ayahNumberStyle: e.target.value as any })}
+          >
+            <option value="none">None</option>
+            <option value="bracket">Normal Brackets (1)</option>
+            <option value="ornate">Ornate Arabic ۝٣٥</option>
+          </select>
         </div>
       </div>
 
@@ -157,32 +155,30 @@ export function Step3Text() {
         <Label className="mb-2 block">Layout</Label>
         <div className="flex items-center justify-between gap-4 mb-4">
           <span className="text-sm font-medium">Layout Preset</span>
-          <Select value={settings.layout} onValueChange={(v: any) => update({ layout: v })}>
-            <SelectTrigger className="w-[140px] h-8 text-sm">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="centered">Centered</SelectItem>
-              <SelectItem value="bottom-third">Bottom Third</SelectItem>
-              <SelectItem value="split">Split</SelectItem>
-              <SelectItem value="arabic-only">Arabic Only</SelectItem>
-            </SelectContent>
-          </Select>
+          <select 
+            className="h-8 w-[140px] rounded-md border border-border bg-transparent px-3 text-sm"
+            value={settings.layout || "centered"} 
+            onChange={(e) => update({ layout: e.target.value as any })}
+          >
+            <option value="centered">Centered</option>
+            <option value="bottom-third">Bottom Third</option>
+            <option value="split">Split</option>
+            <option value="arabic-only">Arabic Only</option>
+          </select>
         </div>
         
         <div className="flex items-center justify-between">
           <span className="text-sm font-medium">Platform Safe Zones</span>
-          <Select value={settings.platformStyle} onValueChange={(v: any) => update({ platformStyle: v })}>
-            <SelectTrigger className="w-[140px] h-8 text-sm">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="default">Default</SelectItem>
-              <SelectItem value="tiktok">TikTok</SelectItem>
-              <SelectItem value="youtube">YouTube Shorts</SelectItem>
-              <SelectItem value="instagram">Instagram Reels</SelectItem>
-            </SelectContent>
-          </Select>
+          <select 
+            className="h-8 w-[140px] rounded-md border border-border bg-transparent px-3 text-sm"
+            value={settings.platformStyle || "default"} 
+            onChange={(e) => update({ platformStyle: e.target.value as any })}
+          >
+            <option value="default">Default</option>
+            <option value="tiktok">TikTok</option>
+            <option value="youtube">YouTube Shorts</option>
+            <option value="instagram">Instagram Reels</option>
+          </select>
         </div>
       </div>
 

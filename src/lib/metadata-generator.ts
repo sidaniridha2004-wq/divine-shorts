@@ -99,9 +99,9 @@ export async function generateAIMetadata(
   fromAyah: number,
   toAyah: number
 ): Promise<{ title: string; description: string; tags: string }> {
-  const apiKey = import.meta.env.VITE_OPENAI_API_KEY;
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
   if (!apiKey) {
-    throw new Error("VITE_OPENAI_API_KEY is missing in .env");
+    throw new Error("VITE_GEMINI_API_KEY is missing in .env");
   }
 
   const langLabel = LANGUAGES.find(l => l.code === language)?.label || language;
@@ -127,24 +127,22 @@ Output ONLY strict JSON format like this, and DO NOT wrap it in markdown code bl
 }`;
 
   try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${apiKey}`, {
       method: "POST",
-      headers: { 
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.7,
-        response_format: { type: "json_object" }
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          response_mime_type: "application/json",
+          temperature: 0.7,
+        }
       })
     });
     
     const data = await res.json();
     if (data.error) throw new Error(data.error.message);
     
-    const text = data.choices?.[0]?.message?.content;
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) throw new Error("No output from AI");
     
     return JSON.parse(text);

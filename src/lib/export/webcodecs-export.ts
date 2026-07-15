@@ -92,10 +92,6 @@ export async function exportVideo(
 
   processor.onaudioprocess = (e) => {
     if (finishedAudio) return;
-    
-    // If network is buffering, skip this chunk so we don't encode silence/ticks into the final MP4
-    if (reciterEl.readyState < 3) return;
-    if (ambientEl && ambientEl.readyState < 3) return;
 
     const left = e.inputBuffer.getChannelData(0);
     const right = e.inputBuffer.getChannelData(1);

@@ -10,7 +10,7 @@ import { exportVideo, type ExportProgress } from "@/lib/export/webcodecs-export"
 import { saveProject } from "@/lib/projects-store";
 import { buildCaption } from "@/lib/caption";
 import { getMp3QuranReciters } from "@/lib/quran-api";
-import { generateMetadata, generateAIMetadata, LANGUAGES, PLATFORMS, type LanguageCode, type PlatformCode } from "@/lib/metadata-generator";
+import { generateMetadata, LANGUAGES, PLATFORMS, type LanguageCode, type PlatformCode } from "@/lib/metadata-generator";
 import { toast } from "sonner";
 import { Download, Save, Copy, Share2, Loader2, Image as ImageIcon, Sparkles } from "lucide-react";
 import type { PreviewHandle } from "@/components/wizard/PreviewCanvas";
@@ -25,9 +25,6 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
   const [platform, setPlatform] = useState<PlatformCode>("youtube");
   const [reciterName, setReciterName] = useState("Unknown Reciter");
   
-  const [aiMetadata, setAiMetadata] = useState<{ title: string; description: string; tags: string } | null>(null);
-  const [isGeneratingAI, setIsGeneratingAI] = useState(false);
-  
   useEffect(() => {
     getMp3QuranReciters().then(reciters => {
       const found = reciters.find(r => r.id === settings.reciterId);
@@ -35,7 +32,7 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
     }).catch(console.error);
   }, [settings.reciterId]);
 
-  const baseMetadata = generateMetadata(
+  const metadata = generateMetadata(
     language,
     platform,
     settings.chapterName,
@@ -43,21 +40,6 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
     settings.fromAyah,
     settings.toAyah
   );
-  
-  const metadata = aiMetadata || baseMetadata;
-
-  const handleAIGenerate = async () => {
-    setIsGeneratingAI(true);
-    try {
-      const data = await generateAIMetadata(language, platform, settings.chapterName, reciterName, settings.fromAyah, settings.toAyah);
-      setAiMetadata(data);
-      toast.success("AI Metadata generated successfully!");
-    } catch (e: any) {
-      toast.error(e.message || "Failed to generate metadata");
-    } finally {
-      setIsGeneratingAI(false);
-    }
-  };
 
   const doExport = async () => {
     if (!preview.current) return;
@@ -185,7 +167,7 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
             <p className="text-xs text-muted-foreground">Generate localized metadata and thumbnail</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Select value={platform} onValueChange={(v) => { setPlatform(v as PlatformCode); setAiMetadata(null); }}>
+            <Select value={platform} onValueChange={(v) => { setPlatform(v as PlatformCode); }}>
               <SelectTrigger className="w-[110px]">
                 <SelectValue />
               </SelectTrigger>
@@ -197,7 +179,7 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
                 ))}
               </SelectContent>
             </Select>
-            <Select value={language} onValueChange={(v) => { setLanguage(v as LanguageCode); setAiMetadata(null); }}>
+            <Select value={language} onValueChange={(v) => { setLanguage(v as LanguageCode); }}>
               <SelectTrigger className="w-[120px]">
                 <SelectValue />
               </SelectTrigger>
@@ -209,10 +191,6 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
                 ))}
               </SelectContent>
             </Select>
-            <Button size="sm" onClick={handleAIGenerate} disabled={isGeneratingAI}>
-              {isGeneratingAI ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4 text-yellow-500" />}
-              AI Write
-            </Button>
           </div>
         </div>
 

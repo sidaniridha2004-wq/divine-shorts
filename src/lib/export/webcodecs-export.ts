@@ -203,7 +203,7 @@ export async function exportVideo(
 
   for (let i = 0; i < totalFrames; i++) {
     const t = (i / fps) * audioSpeed;
-    await preview.drawFrame(t);
+    await preview.drawFrame(t, true);
     
     offCtx.drawImage(canvas, 0, 0, vWidth, vHeight);
     

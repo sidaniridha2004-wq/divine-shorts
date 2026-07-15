@@ -92,6 +92,19 @@ export async function exportVideo(
 
   processor.onaudioprocess = (e) => {
     if (finishedAudio) return;
+    
+    // Fade out and stop the reciter so we don't bleed into the next ayah during padding
+    const lastSeg = segments[segments.length - 1];
+    const reciterPhysicalDuration = (lastSeg.start + lastSeg.duration) / audioSpeed;
+    const reciterRemaining = reciterPhysicalDuration - audioTime;
+    if (reciterRemaining <= 0) {
+      reciterEl.volume = 0;
+      reciterEl.pause();
+    } else if (reciterRemaining < 0.5) {
+      reciterEl.volume = Math.max(0, reciterRemaining / 0.5);
+    } else {
+      reciterEl.volume = 1;
+    }
 
     const left = e.inputBuffer.getChannelData(0);
     const right = e.inputBuffer.getChannelData(1);
@@ -139,7 +152,8 @@ export async function exportVideo(
   silentGain.connect(audioCtx.destination);
 
   // Play audio elements
-  reciterEl.currentTime = segments[0].absoluteStart;
+  reciterEl.volume = 1;
+  reciterEl.currentTime = segments[0].start; // Use start, absoluteStart doesn't exist
   reciterEl.playbackRate = audioSpeed;
   
   const playPromise = new Promise<void>((resolve) => {

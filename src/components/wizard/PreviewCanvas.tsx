@@ -23,9 +23,9 @@ export interface PreviewHandle {
   getAudioContext: () => AudioContext | null;
   getAudioDestination: () => MediaStreamAudioDestinationNode | null;
   getMasterGain: () => GainNode | null;
-  getSegmentTimings: () => { verse_key: string; start: number; duration: number }[];
+  getSegmentTimings: () => { verse_key: string; start: number; duration: number; absoluteStart: number; absoluteEnd: number }[];
   getCurrentTime: () => number;
-  drawFrame: (t: number) => Promise<void>;
+  drawFrame: (t: number, isExporting?: boolean) => Promise<void>;
   muteSpeakers: (muted: boolean) => void;
   captureThumbnail: () => Promise<string | null>;
 }
@@ -192,7 +192,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         const newSegments = filtered.map((t, idx) => {
           const absStart = t.start_time / 1000;
           let absEnd = t.end_time / 1000;
-          if (idx === filtered.length - 1) absEnd += PADDING;
+          // Padding is added to totalDuration, not to the last segment's duration
           
           return {
             verse_key: `${settings.chapterId}:${t.ayah}`,
@@ -488,33 +488,37 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         getSegmentTimings: () => segments,
         getCurrentTime: () => localTimeRef.current,
         muteSpeakers: (muted: boolean) => setSpeakerMuted(muted),
-        drawFrame: async (t: number) => {
+        drawFrame: async (t: number, isExporting?: boolean) => {
           const clamped = Math.max(0, Math.min(t, duration));
-          const targetAbsTime = segments[0]?.absoluteStart + clamped;
-          let idx = segments.findIndex(sg => targetAbsTime >= sg.absoluteStart && targetAbsTime < sg.absoluteEnd);
+          const targetAbsTime = segments[0]?.start + clamped; // use start instead of absoluteStart which doesn't exist on PreviewHandle type
+          let idx = segments.findIndex(sg => targetAbsTime >= sg.start && targetAbsTime < (sg.start + sg.duration));
           if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
           
           if (videoRef.current instanceof HTMLVideoElement) {
             const v = videoRef.current;
-            // Video background is essentially decorative. To prevent webcodecs deadlock,
-            // we will quickly seek it and wait for it to be ready.
+            if (isExporting) {
               if (v.readyState > 0) {
-                v.currentTime = clamped % v.duration;
-                // wait for seek to finish or timeout to prevent stalling
-                await new Promise<void>(r => {
-                  let fired = false;
-                  const done = () => { if (!fired) { fired = true; r(); } };
-                  v.addEventListener("seeked", () => {
-                    if ('requestVideoFrameCallback' in v) {
-                      // Ensure the frame is fully decoded and painted to prevent blurry intermediate frames
-                      (v as any).requestVideoFrameCallback(done);
-                    } else {
-                      done();
-                    }
-                  }, { once: true });
-                  setTimeout(done, 1500); // 1.5s timeout ensures we don't stall forever, but allows enough time for decoding
-                });
+                v.pause(); // Crucial to prevent decoder artifacts
+                const targetTime = clamped % v.duration;
+                if (Math.abs(v.currentTime - targetTime) > 0.05) {
+                  v.currentTime = targetTime;
+                  await new Promise<void>(r => {
+                    let fired = false;
+                    const done = () => { if (!fired) { fired = true; r(); } };
+                    v.addEventListener("seeked", () => {
+                      if ('requestVideoFrameCallback' in v) {
+                        (v as any).requestVideoFrameCallback(done);
+                      } else {
+                        done();
+                      }
+                    }, { once: true });
+                    setTimeout(done, 1500);
+                  });
+                }
               }
+            } else if (v.paused) {
+              v.play().catch(() => {});
+            }
           }
           draw(clamped, idx);
         },
@@ -704,7 +708,7 @@ function drawText(
     const inSeg = Math.max(0, t - seg.start);
     const speed = 0.4 / s.animationSpeed;
     alpha = Math.min(1, inSeg / speed);
-    if (seg.duration - inSeg < speed) alpha = Math.max(0.2, (seg.duration - inSeg) / speed);
+    if (seg.duration - inSeg < speed) alpha = Math.max(0, (seg.duration - inSeg) / speed); // fade completely out during padding
   }
   ctx.globalAlpha = alpha;
 

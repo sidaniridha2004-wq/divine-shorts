@@ -153,7 +153,7 @@ export async function exportVideo(
 
   // Play audio elements
   reciterEl.volume = 1;
-  reciterEl.currentTime = segments[0].start; // Use start, absoluteStart doesn't exist
+  reciterEl.currentTime = segments[0].absoluteStart;
   reciterEl.playbackRate = audioSpeed;
   
   const playPromise = new Promise<void>((resolve) => {

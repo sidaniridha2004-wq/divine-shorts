@@ -98,8 +98,8 @@ export function Step4Style() {
       let minDuration = 0;
       if (matchDur && type === "video" && settings.chapterId && settings.reciterId && settings.fromAyah && settings.toAyah) {
         const timings = await getAyahTimings(settings.chapterId, settings.reciterId);
-        const startAyah = timings.find((t) => t.verse_key === `${settings.chapterId}:${settings.fromAyah}`);
-        const endAyah = timings.find((t) => t.verse_key === `${settings.chapterId}:${settings.toAyah}`);
+        const startAyah = timings.find((t) => t.ayah === settings.fromAyah);
+        const endAyah = timings.find((t) => t.ayah === settings.toAyah);
         if (startAyah && endAyah) {
           minDuration = (endAyah.end_time - startAyah.start_time) / 1000;
           if (settings.audioSpeed) minDuration /= settings.audioSpeed;
@@ -291,7 +291,7 @@ export function Step4Style() {
             <span className="ml-2 text-sm text-muted-foreground">Searching {mediaProvider === "pexels" ? "Pexels" : "Pixabay"}…</span>
           </div>
         )}
-        {!pexelsLoading && pexelsType === "video" && pexelsVideoResults.length > 0 && (
+        {!pexelsLoading && mediaProvider === "pexels" && pexelsType === "video" && pexelsVideoResults.length > 0 && (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {pexelsVideoResults.map((video) => {
               const active = selectedPexelsId === video.id;

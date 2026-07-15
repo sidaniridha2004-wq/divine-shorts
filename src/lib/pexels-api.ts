@@ -14,6 +14,7 @@ export type PexelsVideo = {
     height: number;
     link: string;
   }[];
+  duration?: number;
 };
 
 export type PexelsPhoto = {

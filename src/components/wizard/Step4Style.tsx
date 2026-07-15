@@ -2,6 +2,8 @@ import { useMemo, useState, useCallback, useEffect, type CSSProperties } from "r
 import { useProjectState } from "@/lib/project-state";
 import { THEMES, THEME_CATEGORIES, type GeneratedTheme } from "@/lib/themes";
 import { searchPexelsVideos, searchPexelsPhotos, getBestVideoUrl, type PexelsVideo, type PexelsPhoto } from "@/lib/pexels-api";
+import { searchPixabayVideos, searchPixabayPhotos, getBestPixabayVideoUrl, type PixabayVideo, type PixabayPhoto } from "@/lib/pixabay-api";
+import { getAyahTimings } from "@/lib/quran-api";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
@@ -46,11 +48,15 @@ export function Step4Style() {
   const [q, setQ] = useState("");
   const [hoverId, setHoverId] = useState<string | null>(null);
 
-  // Pexels search state
+  // Media search state
+  const [mediaProvider, setMediaProvider] = useState<"pexels" | "pixabay">("pexels");
+  const [matchDuration, setMatchDuration] = useState(false);
   const [pexelsQuery, setPexelsQuery] = useState("");
   const [pexelsType, setPexelsType] = useState<"video" | "photo">("video");
   const [pexelsVideoResults, setPexelsVideoResults] = useState<PexelsVideo[]>([]);
   const [pexelsPhotoResults, setPexelsPhotoResults] = useState<PexelsPhoto[]>([]);
+  const [pixabayVideoResults, setPixabayVideoResults] = useState<PixabayVideo[]>([]);
+  const [pixabayPhotoResults, setPixabayPhotoResults] = useState<PixabayPhoto[]>([]);
   const [pexelsLoading, setPexelsLoading] = useState(false);
   const [pexelsHoverId, setPexelsHoverId] = useState<number | null>(null);
   const [selectedPexelsId, setSelectedPexelsId] = useState<number | null>(null);
@@ -84,31 +90,58 @@ export function Step4Style() {
     reader.readAsDataURL(file);
   };
 
-  // Pexels search handler
-  const searchPexels = useCallback(async (query: string, type: "video" | "photo") => {
+  // Media search handler
+  const searchMedia = useCallback(async (query: string, type: "video" | "photo", provider: "pexels" | "pixabay", matchDur: boolean) => {
     if (!query.trim()) return;
     setPexelsLoading(true);
     try {
-      if (type === "video") {
-        const result = await searchPexelsVideos(query, { orientation: "portrait", perPage: 15 });
-        setPexelsVideoResults(result.videos || []);
-        if (!result.videos?.length) toast.info("No Pexels videos found — try a different search");
+      let minDuration = 0;
+      if (matchDur && type === "video" && settings.chapterId && settings.reciterId && settings.fromAyah && settings.toAyah) {
+        const timings = await getAyahTimings(settings.chapterId, settings.reciterId);
+        const startAyah = timings.find((t) => t.verse_key === `${settings.chapterId}:${settings.fromAyah}`);
+        const endAyah = timings.find((t) => t.verse_key === `${settings.chapterId}:${settings.toAyah}`);
+        if (startAyah && endAyah) {
+          minDuration = (endAyah.end_time - startAyah.start_time) / 1000;
+          if (settings.audioSpeed) minDuration /= settings.audioSpeed;
+        }
+      }
+
+      if (provider === "pexels") {
+        if (type === "video") {
+          const result = await searchPexelsVideos(query, { orientation: "portrait", perPage: 50 });
+          let videos = result.videos || [];
+          if (minDuration > 0) videos = videos.filter((v) => (v.duration || 0) >= minDuration);
+          setPexelsVideoResults(videos);
+          if (!videos.length) toast.info(minDuration > 0 ? "No Pexels videos found matching the required length" : "No Pexels videos found");
+        } else {
+          const result = await searchPexelsPhotos(query, { orientation: "portrait", perPage: 50 });
+          setPexelsPhotoResults(result.photos || []);
+          if (!result.photos?.length) toast.info("No Pexels photos found");
+        }
       } else {
-        const result = await searchPexelsPhotos(query, { orientation: "portrait", perPage: 15 });
-        setPexelsPhotoResults(result.photos || []);
-        if (!result.photos?.length) toast.info("No Pexels photos found — try a different search");
+        if (type === "video") {
+          const result = await searchPixabayVideos(query, { perPage: 50 });
+          let videos = result.videos || [];
+          if (minDuration > 0) videos = videos.filter((v) => (v.duration || 0) >= minDuration);
+          setPixabayVideoResults(videos);
+          if (!videos.length) toast.info(minDuration > 0 ? "No Pixabay videos found matching the required length" : "No Pixabay videos found");
+        } else {
+          const result = await searchPixabayPhotos(query, { orientation: "vertical", perPage: 50 });
+          setPixabayPhotoResults(result.photos || []);
+          if (!result.photos?.length) toast.info("No Pixabay photos found");
+        }
       }
     } catch (err) {
-      toast.error(`Failed to search Pexels ${type}s`);
+      toast.error(`Failed to search media`);
       console.error(err);
     } finally {
       setPexelsLoading(false);
     }
-  }, []);
+  }, [settings.chapterId, settings.reciterId, settings.fromAyah, settings.toAyah, settings.audioSpeed]);
 
   const handlePexelsSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    searchPexels(pexelsQuery, pexelsType);
+    searchMedia(pexelsQuery, pexelsType, mediaProvider, matchDuration);
   };
 
   const selectPexelsVideo = (video: PexelsVideo) => {
@@ -128,43 +161,101 @@ export function Step4Style() {
     toast.success(`Background: Pexels photo by ${photo.photographer}`);
   };
 
+  const selectPixabayVideo = (video: PixabayVideo) => {
+    const videoUrl = getBestPixabayVideoUrl(video);
+    if (!videoUrl) {
+      toast.error("No suitable video file found");
+      return;
+    }
+    update({ customBg: videoUrl });
+    setSelectedPexelsId(video.id);
+    toast.success(`Background: Pixabay video by ${video.user}`);
+  };
+
+  const selectPixabayPhoto = (photo: PixabayPhoto) => {
+    update({ customBg: photo.largeImageURL });
+    setSelectedPexelsId(photo.id);
+    toast.success(`Background: Pixabay photo by ${photo.user}`);
+  };
+
   // Load initial suggestions on mount
   useEffect(() => {
     const randomSuggestion = PEXELS_SUGGESTIONS[Math.floor(Math.random() * PEXELS_SUGGESTIONS.length)];
     setPexelsQuery(randomSuggestion);
-    searchPexels(randomSuggestion, pexelsType);
-  }, [searchPexels]); // deliberately omit pexelsType so it only runs once
+    searchMedia(randomSuggestion, pexelsType, mediaProvider, matchDuration);
+  }, [searchMedia]); // deliberately omit dependencies so it only runs once
 
   return (
     <div className="space-y-6">
-      {/* ── Pexels Search ─────────────────────────────────── */}
+      {/* ── Media Search ─────────────────────────────────── */}
       <div>
         <div className="mb-3 flex items-center justify-between gap-3">
           <Label className="flex items-center gap-2">
             <Search className="h-4 w-4 text-accent" />
-            Search Pexels Media
+            Search Media Library
           </Label>
-          <span className="text-[10px] text-muted-foreground">Powered by Pexels</span>
+          <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-bold">
+            Powered by {mediaProvider === "pexels" ? "Pexels" : "Pixabay"}
+          </span>
         </div>
         
-        <div className="mb-3 flex gap-2">
-          {(["video", "photo"] as const).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => {
-                setPexelsType(t);
-                if (pexelsQuery) searchPexels(pexelsQuery, t);
-              }}
-              className={`rounded-md border px-4 py-1.5 text-xs capitalize transition ${
-                pexelsType === t
-                  ? "border-accent bg-accent/20 text-accent font-medium"
-                  : "border-border bg-card text-muted-foreground hover:border-accent/50"
-              }`}
-            >
-              {t}s
-            </button>
-          ))}
+        <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex gap-2">
+            {(["video", "photo"] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => {
+                  setPexelsType(t);
+                  if (pexelsQuery) searchMedia(pexelsQuery, t, mediaProvider, matchDuration);
+                }}
+                className={`rounded-md border px-4 py-1.5 text-xs capitalize transition ${
+                  pexelsType === t
+                    ? "border-accent bg-accent/20 text-accent font-medium"
+                    : "border-border bg-card text-muted-foreground hover:border-accent/50"
+                }`}
+              >
+                {t}s
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-4">
+            {pexelsType === "video" && (
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="match-duration"
+                  checked={matchDuration}
+                  onCheckedChange={(c) => {
+                    setMatchDuration(c);
+                    if (pexelsQuery) searchMedia(pexelsQuery, pexelsType, mediaProvider, c);
+                  }}
+                />
+                <Label htmlFor="match-duration" className="text-xs cursor-pointer">
+                  Match Audio Length
+                </Label>
+              </div>
+            )}
+            <div className="flex gap-2">
+              {(["pexels", "pixabay"] as const).map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => {
+                    setMediaProvider(p);
+                    if (pexelsQuery) searchMedia(pexelsQuery, pexelsType, p, matchDuration);
+                  }}
+                  className={`rounded-md border px-3 py-1.5 text-[10px] uppercase font-bold tracking-wider transition ${
+                    mediaProvider === p
+                      ? "border-accent bg-accent text-black"
+                      : "border-border bg-card text-muted-foreground hover:border-accent/50"
+                  }`}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         <form onSubmit={handlePexelsSearch} className="mb-3 flex gap-2">
@@ -183,7 +274,7 @@ export function Step4Style() {
             <button
               key={s}
               type="button"
-              onClick={() => { setPexelsQuery(s); searchPexels(s, pexelsType); }}
+              onClick={() => { setPexelsQuery(s); searchMedia(s, pexelsType, mediaProvider, matchDuration); }}
               className={`rounded-full border px-2.5 py-1 text-[10px] transition ${
                 pexelsQuery === s
                   ? "border-accent bg-accent/20 text-accent"
@@ -197,7 +288,7 @@ export function Step4Style() {
         {pexelsLoading && (
           <div className="flex items-center justify-center py-8">
             <Loader2 className="h-6 w-6 animate-spin text-accent" />
-            <span className="ml-2 text-sm text-muted-foreground">Searching Pexels…</span>
+            <span className="ml-2 text-sm text-muted-foreground">Searching {mediaProvider === "pexels" ? "Pexels" : "Pixabay"}…</span>
           </div>
         )}
         {!pexelsLoading && pexelsType === "video" && pexelsVideoResults.length > 0 && (
@@ -246,7 +337,53 @@ export function Step4Style() {
           </div>
         )}
         
-        {!pexelsLoading && pexelsType === "photo" && pexelsPhotoResults.length > 0 && (
+        {!pexelsLoading && mediaProvider === "pixabay" && pexelsType === "video" && pixabayVideoResults.length > 0 && (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {pixabayVideoResults.map((video) => {
+              const active = selectedPexelsId === video.id;
+              const hovering = pexelsHoverId === video.id;
+              const videoUrl = getBestPixabayVideoUrl(video);
+              return (
+                <button
+                  key={video.id}
+                  type="button"
+                  onClick={() => selectPixabayVideo(video)}
+                  onMouseEnter={() => setPexelsHoverId(video.id)}
+                  onMouseLeave={() => setPexelsHoverId((h) => (h === video.id ? null : h))}
+                  className={`group relative aspect-[9/16] overflow-hidden rounded-xl border transition ${
+                    active
+                      ? "border-accent shadow-gold"
+                      : "border-border hover:border-accent/50"
+                  }`}
+                >
+                  {!hovering && (
+                    <img
+                      src={`https://i.vimeocdn.com/video/${video.picture_id}_295x166.jpg`}
+                      alt={`Video by ${video.user}`}
+                      className="absolute inset-0 h-full w-full object-cover"
+                      loading="lazy"
+                    />
+                  )}
+                  {hovering && videoUrl && (
+                    <video
+                      src={videoUrl}
+                      autoPlay
+                      muted
+                      loop
+                      playsInline
+                      className="absolute inset-0 h-full w-full object-cover"
+                    />
+                  )}
+                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-2 text-left text-[10px] font-medium text-white">
+                    📷 {video.user}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        
+        {!pexelsLoading && mediaProvider === "pexels" && pexelsType === "photo" && pexelsPhotoResults.length > 0 && (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {pexelsPhotoResults.map((photo) => {
               const active = selectedPexelsId === photo.id;
@@ -269,6 +406,36 @@ export function Step4Style() {
                   />
                   <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-2 text-left text-[10px] font-medium text-white">
                     📷 {photo.photographer}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {!pexelsLoading && mediaProvider === "pixabay" && pexelsType === "photo" && pixabayPhotoResults.length > 0 && (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {pixabayPhotoResults.map((photo) => {
+              const active = selectedPexelsId === photo.id;
+              return (
+                <button
+                  key={photo.id}
+                  type="button"
+                  onClick={() => selectPixabayPhoto(photo)}
+                  className={`group relative aspect-[9/16] overflow-hidden rounded-xl border transition ${
+                    active
+                      ? "border-accent shadow-gold"
+                      : "border-border hover:border-accent/50"
+                  }`}
+                >
+                  <img
+                    src={photo.largeImageURL}
+                    alt={`Photo by ${photo.user}`}
+                    className="absolute inset-0 h-full w-full object-cover"
+                    loading="lazy"
+                  />
+                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-2 text-left text-[10px] font-medium text-white">
+                    📷 {photo.user}
                   </div>
                 </button>
               );

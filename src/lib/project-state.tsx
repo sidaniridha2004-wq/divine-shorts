@@ -22,12 +22,13 @@ export type ProjectSettings = {
   translationId: number | null;
   showTransliteration: boolean;
   showAyahNumber: boolean;
-  encloseInBrackets: boolean;
+  ayahNumberStyle: "none" | "bracket" | "ornate";
   textColor: string;
   letterSpacing: number;
   lineHeight: number;
   textShadow: boolean;
   maxWidthPct: number;
+  platformStyle: "default" | "tiktok" | "youtube" | "instagram";
   layout: "centered" | "arabic-only" | "bottom-third" | "split";
   animation: "fade" | "word-fade" | "typewriter" | "slide-up" | "scale-glow";
   animationSpeed: number;
@@ -63,13 +64,14 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   translationId: 20,
   showTransliteration: false,
   showAyahNumber: true,
-  encloseInBrackets: false,
+  ayahNumberStyle: "ornate",
   textColor: "#F5F1E8",
   letterSpacing: 0,
   lineHeight: 1.9,
   textShadow: true,
   maxWidthPct: 85,
   layout: "centered",
+  platformStyle: "default",
   animation: "fade",
   animationSpeed: 1,
   themeId: "stars",

@@ -151,25 +151,40 @@ export async function exportVideo(
   processor.connect(silentGain);
   silentGain.connect(audioCtx.destination);
 
+  onProgress({ phase: "encoding", progress: 0.06, message: "Buffering audio to exact timestamp (may take a moment)..." });
+  
+  const waitAudioReady = (el: HTMLAudioElement) => new Promise<void>((resolve) => {
+    if (el.readyState >= 3) {
+      resolve();
+      return;
+    }
+    const onPlaying = () => {
+      el.removeEventListener("playing", onPlaying);
+      resolve();
+    };
+    el.addEventListener("playing", onPlaying);
+    // 30s fallback timeout for very slow networks
+    setTimeout(() => {
+      el.removeEventListener("playing", onPlaying);
+      resolve();
+    }, 30000);
+  });
+
   // Play audio elements
   reciterEl.volume = 1;
   reciterEl.currentTime = segments[0].absoluteStart;
   reciterEl.playbackRate = audioSpeed;
+  const p1 = waitAudioReady(reciterEl);
+  reciterEl.play().catch(console.warn);
   
-  const playPromise = new Promise<void>((resolve) => {
-    if (reciterEl.readyState >= 3) resolve();
-    else reciterEl.addEventListener("playing", () => resolve(), { once: true });
-    // fallback timeout just in case
-    setTimeout(resolve, 2000);
-  });
-  
-  await reciterEl.play().catch(console.warn);
-  await playPromise;
-  
+  let p2 = Promise.resolve();
   if (ambientEl) {
     ambientEl.currentTime = 0;
-    await ambientEl.play().catch(console.warn);
+    p2 = waitAudioReady(ambientEl);
+    ambientEl.play().catch(console.warn);
   }
+
+  await Promise.all([p1, p2]);
 
   onProgress({ phase: "encoding", progress: 0.1, message: "Recording audio (guaranteeing clarity)..." });
   await audioPromise;

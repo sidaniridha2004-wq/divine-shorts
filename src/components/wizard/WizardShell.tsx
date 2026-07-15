@@ -47,11 +47,16 @@ export function WizardShell() {
       const randTheme = THEMES[Math.floor(Math.random() * THEMES.length)];
       
       const chapters = await getChapters();
-      const randChapter = chapters[Math.floor(Math.random() * chapters.length)];
+      
+      const randomVals = new Uint32Array(3);
+      window.crypto.getRandomValues(randomVals);
+      
+      const randChapterIdx = randomVals[0] % chapters.length;
+      const randChapter = chapters[randChapterIdx];
       
       const maxFrom = Math.max(1, randChapter.verses_count - 2);
-      const randFrom = Math.floor(Math.random() * maxFrom) + 1;
-      const randTo = Math.min(randChapter.verses_count, randFrom + Math.floor(Math.random() * 4));
+      const randFrom = (randomVals[1] % maxFrom) + 1;
+      const randTo = Math.min(randChapter.verses_count, randFrom + (randomVals[2] % 4));
 
       update({
         chapterId: randChapter.id,

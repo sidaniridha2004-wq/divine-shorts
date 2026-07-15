@@ -137,38 +137,51 @@ export function Step3Text() {
           />
           Show Ayah number ﴾١﴿
         </label>
-        
-        <label className="flex items-center gap-2 text-sm">
-          <Switch
-            checked={settings.encloseInBrackets}
-            onCheckedChange={(v) => update({ encloseInBrackets: v })}
-          />
-          Enclose in ornate brackets ﴾ ﴿
-        </label>
+        <div className="flex flex-col gap-2 mt-2">
+          <span className="text-sm font-medium">Ayah Number Style</span>
+          <Select value={settings.ayahNumberStyle} onValueChange={(v: any) => update({ ayahNumberStyle: v })}>
+            <SelectTrigger className="w-full h-8 text-sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">None</SelectItem>
+              <SelectItem value="bracket">Normal Brackets (1)</SelectItem>
+              <SelectItem value="ornate">Ornate Arabic ۝٣٥</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       <div>
         <Label className="mb-2 block">Layout</Label>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {[
-            { id: "centered", label: "Centered stack" },
-            { id: "arabic-only", label: "Arabic only" },
-            { id: "bottom-third", label: "Bottom third" },
-            { id: "split", label: "Split top/bottom" },
-          ].map((l) => (
-            <button
-              key={l.id}
-              type="button"
-              onClick={() => update({ layout: l.id as never })}
-              className={`rounded-md border p-3 text-xs ${
-                settings.layout === l.id
-                  ? "border-accent bg-accent/10"
-                  : "border-border bg-card hover:border-accent/50"
-              }`}
-            >
-              {l.label}
-            </button>
-          ))}
+        <div className="flex items-center justify-between gap-4 mb-4">
+          <span className="text-sm font-medium">Layout Preset</span>
+          <Select value={settings.layout} onValueChange={(v: any) => update({ layout: v })}>
+            <SelectTrigger className="w-[140px] h-8 text-sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="centered">Centered</SelectItem>
+              <SelectItem value="bottom-third">Bottom Third</SelectItem>
+              <SelectItem value="split">Split</SelectItem>
+              <SelectItem value="arabic-only">Arabic Only</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">Platform Safe Zones</span>
+          <Select value={settings.platformStyle} onValueChange={(v: any) => update({ platformStyle: v })}>
+            <SelectTrigger className="w-[140px] h-8 text-sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="default">Default</SelectItem>
+              <SelectItem value="tiktok">TikTok</SelectItem>
+              <SelectItem value="youtube">YouTube Shorts</SelectItem>
+              <SelectItem value="instagram">Instagram Reels</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
 

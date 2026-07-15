@@ -686,22 +686,36 @@ function drawText(
   const currentVerse =
     (seg && selected.find((v) => v.verse_key === seg.verse_key)) ?? selected[0];
   let arabic = currentVerse.text_uthmani;
-  if (s.encloseInBrackets) {
-    arabic = `﴾ ${arabic} ﴿`;
-  }
+  
   if (s.showAyahNumber) {
     const num = currentVerse.verse_number.toString().replace(/[0-9]/g, (w) => "٠١٢٣٤٥٦٧٨٩"[+w]);
-    arabic = `${arabic} ﴾${num}﴿`;
+    if (s.ayahNumberStyle === "ornate") {
+      // Use the Arabic ornate bracket (U+06DD) followed by the digits
+      arabic = `${arabic} \u06DD${num}`;
+    } else if (s.ayahNumberStyle === "bracket") {
+      arabic = `${arabic} ﴾${num}﴿`;
+    } else {
+      arabic = `${arabic} ${num}`;
+    }
   }
 
   const translation =
     currentVerse.translations?.[0]?.text?.replace(/<[^>]*>/g, "") ?? "";
 
-  const maxW = w * (s.maxWidthPct / 100);
+  let maxW = w * (s.maxWidthPct / 100);
   const centerX = w / 2;
   let baseY = h / 2;
-  if (s.layout === "bottom-third") baseY = h * 0.72;
-  if (s.layout === "split") baseY = h * 0.35;
+  if (s.layout === "bottom-third") {
+    baseY = h * 0.72;
+    if (s.platformStyle === "tiktok" || s.platformStyle === "instagram") {
+      baseY = h * 0.8;
+      maxW = Math.min(maxW, w * 0.75); // Leave right side free for icons
+    } else if (s.platformStyle === "youtube") {
+      baseY = h * 0.76;
+    }
+  } else if (s.layout === "split") {
+    baseY = h * 0.35;
+  }
 
   let alpha = 1;
   if (seg) {

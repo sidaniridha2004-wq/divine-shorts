@@ -37,13 +37,17 @@ export type ProjectSettings = {
   customBg: string | null;
   bgMode: "global" | "per-ayah";
   ayahBgs: Record<number, string>;
+  bgZoom: number;
+  bgPanX: number;
+  bgPanY: number;
+  ayahTransforms: Record<number, { zoom: number; x: number; y: number }>;
   overlayDarkness: number; // 0..0.8
   blur: number; // 0..20
   vignette: boolean;
   grain: boolean;
   kenBurns: boolean;
   watermark: { type: "none" | "logo" | "text"; text: string; position: "tl" | "tr" | "bl" | "br" };
-  frame: "none" | "gold-thin" | "arch" | "rounded";
+  frame: "none" | "gold-thin" | "arch" | "rounded" | "blurred-glass";
   // Format
   aspect: AspectRatio;
   resolution: 720 | 1080;
@@ -80,6 +84,10 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   customBg: null,
   bgMode: "global",
   ayahBgs: {},
+  bgZoom: 1,
+  bgPanX: 0,
+  bgPanY: 0,
+  ayahTransforms: {},
   overlayDarkness: 0.4,
   blur: 0,
   vignette: true,

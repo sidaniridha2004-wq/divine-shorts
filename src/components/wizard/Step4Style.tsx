@@ -660,6 +660,70 @@ export function Step4Style() {
         </label>
       </div>
 
+      <div className="mt-6 mb-6 rounded-xl border bg-card p-4">
+        <Label className="mb-4 block font-semibold text-accent">Background Position & Crop</Label>
+        {settings.bgMode === "per-ayah" && selectedAyah !== null && (
+          <p className="mb-4 text-xs text-muted-foreground">Adjusting crop for Ayah {selectedAyah} specifically.</p>
+        )}
+        <div className="grid gap-6 sm:grid-cols-3">
+          {(() => {
+            const transform = settings.bgMode === "per-ayah" && selectedAyah
+              ? (settings.ayahTransforms?.[selectedAyah] || { zoom: 1, x: 0, y: 0 })
+              : { zoom: settings.bgZoom || 1, x: settings.bgPanX || 0, y: settings.bgPanY || 0 };
+
+            const updateTransform = (key: 'zoom'|'x'|'y', val: number) => {
+              if (settings.bgMode === "per-ayah" && selectedAyah) {
+                update({
+                  ayahTransforms: {
+                    ...settings.ayahTransforms,
+                    [selectedAyah]: { ...transform, [key]: val }
+                  }
+                });
+              } else {
+                if (key === 'zoom') update({ bgZoom: val });
+                if (key === 'x') update({ bgPanX: val });
+                if (key === 'y') update({ bgPanY: val });
+              }
+            };
+
+            return (
+              <>
+                <div>
+                  <Label className="mb-2 block text-xs">Zoom ({transform.zoom.toFixed(2)}x)</Label>
+                  <Slider
+                    value={[transform.zoom]}
+                    min={1}
+                    max={3}
+                    step={0.05}
+                    onValueChange={(v) => updateTransform('zoom', v[0])}
+                  />
+                </div>
+                <div>
+                  <Label className="mb-2 block text-xs">Pan X ({transform.x}%)</Label>
+                  <Slider
+                    value={[transform.x]}
+                    min={-100}
+                    max={100}
+                    step={1}
+                    onValueChange={(v) => updateTransform('x', v[0])}
+                  />
+                </div>
+                <div>
+                  <Label className="mb-2 block text-xs">Pan Y ({transform.y}%)</Label>
+                  <Slider
+                    value={[transform.y]}
+                    min={-100}
+                    max={100}
+                    step={1}
+                    onValueChange={(v) => updateTransform('y', v[0])}
+                  />
+                </div>
+              </>
+            );
+          })()}
+        </div>
+      </div>
+
       <div>
         <Label className="mb-2 block">Watermark</Label>
         <div className="mb-2 flex gap-2">
@@ -713,7 +777,7 @@ export function Step4Style() {
       <div>
         <Label className="mb-2 block">Frame</Label>
         <div className="flex flex-wrap gap-2">
-          {(["none", "gold-thin", "arch", "rounded"] as const).map((f) => (
+          {(["none", "gold-thin", "arch", "rounded", "blurred-glass"] as const).map((f) => (
             <button
               key={f}
               type="button"
@@ -724,7 +788,7 @@ export function Step4Style() {
                   : "border-border bg-card"
               }`}
             >
-              {f === "none" ? "Full Screen" : f === "gold-thin" ? "Gold Border" : f === "rounded" ? "Rounded Box" : "Arch Window"}
+              {f === "none" ? "Full Screen" : f === "gold-thin" ? "Gold Border" : f === "rounded" ? "Rounded Center (Black)" : f === "blurred-glass" ? "Rounded Center (Blurred)" : "Arch Window"}
             </button>
           ))}
         </div>

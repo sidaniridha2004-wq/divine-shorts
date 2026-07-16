@@ -309,8 +309,13 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         const isTransitioning = settings.bgMode === "per-ayah" && segIdx > 0 && timeInSeg >= 0 && timeInSeg < TRANSITION_DUR;
         const crossfadeProgress = isTransitioning ? timeInSeg / TRANSITION_DUR : 1;
 
+        const currentAyahNum = parseInt(segments[segIdx]?.verse_key?.split(":")[1] || "0");
+        const transform = settings.bgMode === "per-ayah" 
+          ? (settings.ayahTransforms?.[currentAyahNum] || { zoom: 1, x: 0, y: 0 })
+          : { zoom: settings.bgZoom || 1, x: settings.bgPanX || 0, y: settings.bgPanY || 0 };
+
         let clipBox = { x: 0, y: 0, w, h };
-        if (settings.frame === "rounded") {
+        if (settings.frame === "rounded" || settings.frame === "blurred-glass") {
           const rectW = w * 0.92;
           const rectH = h * 0.40;
           clipBox = { x: (w - rectW) / 2, y: (h - rectH) / 2, w: rectW, h: rectH };
@@ -323,8 +328,83 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         ctx.fillStyle = "#000000";
         ctx.fillRect(0, 0, w, h);
 
+        const drawMedia = (v: HTMLVideoElement | HTMLImageElement | null, alpha: number, box: {x:number,y:number,w:number,h:number}, blurVal: number, applyTransform: boolean) => {
+          const vw = ((v as any)?.videoWidth ?? (v as HTMLImageElement)?.naturalWidth ?? 0) as number;
+          const vh = ((v as any)?.videoHeight ?? (v as HTMLImageElement)?.naturalHeight ?? 0) as number;
+          const isVideo = v && 'readyState' in v;
+          const videoReady = !!v && vw > 0 && vh > 0 && (!isVideo || (v as HTMLVideoElement).readyState >= 2);
+          
+          const theme = THEMES.find((th) => th.id === settings.themeId);
+          const wantsVideo = !!settings.customBg || !!theme?.video || settings.bgMode === "per-ayah";
+          
+          ctx.globalAlpha = alpha;
+          if (wantsVideo && videoReady) {
+            try {
+              const bleed = blurVal > 0 ? blurVal * 2 : 0;
+              const targetW = box.w + bleed * 2;
+              const targetH = box.h + bleed * 2;
+
+              const tZoom = applyTransform ? transform.zoom : 1;
+              const tPanX = applyTransform ? transform.x : 0;
+              const tPanY = applyTransform ? transform.y : 0;
+
+              let scale = Math.max(targetW / vw, targetH / vh) * (settings.kenBurns ? 1 + Math.sin(t * 0.05) * 0.05 + 0.05 : 1);
+              scale *= tZoom;
+
+              const dw = vw * scale;
+              const dh = vh * scale;
+              
+              let dx = box.x - bleed + (targetW - dw) / 2;
+              let dy = box.y - bleed + (targetH - dh) / 2;
+
+              dx += (tPanX / 100) * (dw / 2);
+              dy += (tPanY / 100) * (dh / 2);
+
+              if (blurVal > 0) ctx.filter = `blur(${blurVal}px)`;
+              ctx.drawImage(v as CanvasImageSource, dx, dy, dw, dh);
+              ctx.filter = "none";
+            } catch {
+              if (alpha === 1) {
+                ctx.fillStyle = "#0B0F0E";
+                ctx.fillRect(box.x, box.y, box.w, box.h);
+              }
+            }
+          } else if (theme?.generated && !settings.customBg) {
+            ctx.save();
+            ctx.translate(box.x, box.y);
+            drawGeneratedBg(ctx, theme.generated, box.w, box.h, t);
+            ctx.restore();
+          } else {
+            if (alpha === 1) {
+              ctx.fillStyle = "#0B0F0E";
+              ctx.fillRect(box.x, box.y, box.w, box.h);
+            }
+          }
+          ctx.globalAlpha = 1.0;
+        };
+
+        const currentAyah = segments[segIdx]?.verse_key?.split(":")[1] || "global";
+        let vCurrent = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
+        const prevAyah = segments[segIdx - 1]?.verse_key?.split(":")[1] || "global";
+        let vPrev = bgMediaRef.current[prevAyah] || bgMediaRef.current["global"];
+
+        // 1. Draw full screen blurred background for "blurred-glass"
+        if (settings.frame === "blurred-glass") {
+          const fullBox = { x: 0, y: 0, w, h };
+          if (isTransitioning) {
+            drawMedia(vPrev, 1, fullBox, 40, false);
+            drawMedia(vCurrent, crossfadeProgress, fullBox, 40, false);
+          } else {
+            drawMedia(vCurrent, 1, fullBox, 40, false);
+          }
+          // Darken the blurred background
+          ctx.fillStyle = "rgba(0,0,0,0.5)";
+          ctx.fillRect(0, 0, w, h);
+        }
+
+        // 2. Setup clip box for the main media
         ctx.save();
-        if (settings.frame === "rounded") {
+        if (settings.frame === "rounded" || settings.frame === "blurred-glass") {
           ctx.beginPath();
           ctx.roundRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h, Math.min(w, h) * 0.05);
           ctx.clip();
@@ -338,57 +418,15 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           ctx.clip();
         }
 
-        const drawMedia = (v: HTMLVideoElement | HTMLImageElement | null, alpha: number) => {
-          const vw = ((v as any)?.videoWidth ?? (v as HTMLImageElement)?.naturalWidth ?? 0) as number;
-          const vh = ((v as any)?.videoHeight ?? (v as HTMLImageElement)?.naturalHeight ?? 0) as number;
-          const isVideo = v && 'readyState' in v;
-          const videoReady = !!v && vw > 0 && vh > 0 && (!isVideo || (v as HTMLVideoElement).readyState >= 2);
-          
-          const theme = THEMES.find((th) => th.id === settings.themeId);
-          const wantsVideo = !!settings.customBg || !!theme?.video || settings.bgMode === "per-ayah";
-          
-          ctx.globalAlpha = alpha;
-          if (wantsVideo && videoReady) {
-            try {
-              const scale = Math.max(clipBox.w / vw, clipBox.h / vh) * (settings.kenBurns ? 1 + Math.sin(t * 0.05) * 0.05 + 0.05 : 1);
-              const dw = vw * scale;
-              const dh = vh * scale;
-              const dx = clipBox.x + (clipBox.w - dw) / 2;
-              const dy = clipBox.y + (clipBox.h - dh) / 2;
-              if (settings.blur > 0) ctx.filter = `blur(${settings.blur}px)`;
-              ctx.drawImage(v as CanvasImageSource, dx, dy, dw, dh);
-              ctx.filter = "none";
-            } catch {
-              if (alpha === 1) {
-                ctx.fillStyle = "#0B0F0E";
-                ctx.fillRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h);
-              }
-            }
-          } else if (theme?.generated && !settings.customBg) {
-            ctx.save();
-            ctx.translate(clipBox.x, clipBox.y);
-            drawGeneratedBg(ctx, theme.generated, clipBox.w, clipBox.h, t);
-            ctx.restore();
-          } else {
-            if (alpha === 1) {
-              ctx.fillStyle = "#0B0F0E";
-              ctx.fillRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h);
-            }
-          }
-          ctx.globalAlpha = 1.0;
-        };
-
-        const currentAyah = segments[segIdx]?.verse_key?.split(":")[1] || "global";
-        let vCurrent = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
-
+        // 3. Draw main media inside clip box
         if (isTransitioning) {
-          const prevAyah = segments[segIdx - 1]?.verse_key?.split(":")[1] || "global";
-          let vPrev = bgMediaRef.current[prevAyah] || bgMediaRef.current["global"];
-          drawMedia(vPrev, 1);
-          drawMedia(vCurrent, crossfadeProgress);
+          drawMedia(vPrev, 1, clipBox, settings.blur, true);
+          drawMedia(vCurrent, crossfadeProgress, clipBox, settings.blur, true);
         } else {
-          drawMedia(vCurrent, 1);
+          drawMedia(vCurrent, 1, clipBox, settings.blur, true);
         }
+
+        // 4. Apply overlays inside clip box
         if (settings.overlayDarkness > 0) {
           ctx.fillStyle = `rgba(0,0,0,${settings.overlayDarkness})`;
           ctx.fillRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h);

@@ -303,36 +303,59 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           canvas.height = h;
         }
 
-        const currentAyah = segments[segIdx]?.verse_key?.split(":")[1] || "global";
-        let v = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
-        
-        const vw = ((v as any)?.videoWidth ?? (v as HTMLImageElement)?.naturalWidth ?? 0) as number;
-        const vh = ((v as any)?.videoHeight ?? (v as HTMLImageElement)?.naturalHeight ?? 0) as number;
-        const isVideo = v && 'readyState' in v;
-        const videoReady = !!v && vw > 0 && vh > 0 && (!isVideo || (v as HTMLVideoElement).readyState >= 2);
-        
-        const theme = THEMES.find((th) => th.id === settings.themeId);
-        const wantsVideo = !!settings.customBg || !!theme?.video || settings.bgMode === "per-ayah";
-        
-        if (wantsVideo && videoReady) {
-          try {
-            const scale = Math.max(w / vw, h / vh) * (settings.kenBurns ? 1 + Math.sin(t * 0.05) * 0.05 + 0.05 : 1);
-            const dw = vw * scale;
-            const dh = vh * scale;
-            const dx = (w - dw) / 2;
-            const dy = (h - dh) / 2;
-            if (settings.blur > 0) ctx.filter = `blur(${settings.blur}px)`;
-            ctx.drawImage(v as CanvasImageSource, dx, dy, dw, dh);
-            ctx.filter = "none";
-          } catch {
-            ctx.fillStyle = "#0B0F0E";
-            ctx.fillRect(0, 0, w, h);
+        const currentSeg = segments[segIdx];
+        const timeInSeg = t - (currentSeg?.start || 0);
+        const TRANSITION_DUR = 1.0; // 1 second crossfade
+        const isTransitioning = settings.bgMode === "per-ayah" && segIdx > 0 && timeInSeg >= 0 && timeInSeg < TRANSITION_DUR;
+        const crossfadeProgress = isTransitioning ? timeInSeg / TRANSITION_DUR : 1;
+
+        const drawMedia = (v: HTMLVideoElement | HTMLImageElement | null, alpha: number) => {
+          const vw = ((v as any)?.videoWidth ?? (v as HTMLImageElement)?.naturalWidth ?? 0) as number;
+          const vh = ((v as any)?.videoHeight ?? (v as HTMLImageElement)?.naturalHeight ?? 0) as number;
+          const isVideo = v && 'readyState' in v;
+          const videoReady = !!v && vw > 0 && vh > 0 && (!isVideo || (v as HTMLVideoElement).readyState >= 2);
+          
+          const theme = THEMES.find((th) => th.id === settings.themeId);
+          const wantsVideo = !!settings.customBg || !!theme?.video || settings.bgMode === "per-ayah";
+          
+          ctx.globalAlpha = alpha;
+          if (wantsVideo && videoReady) {
+            try {
+              const scale = Math.max(w / vw, h / vh) * (settings.kenBurns ? 1 + Math.sin(t * 0.05) * 0.05 + 0.05 : 1);
+              const dw = vw * scale;
+              const dh = vh * scale;
+              const dx = (w - dw) / 2;
+              const dy = (h - dh) / 2;
+              if (settings.blur > 0) ctx.filter = `blur(${settings.blur}px)`;
+              ctx.drawImage(v as CanvasImageSource, dx, dy, dw, dh);
+              ctx.filter = "none";
+            } catch {
+              if (alpha === 1) {
+                ctx.fillStyle = "#0B0F0E";
+                ctx.fillRect(0, 0, w, h);
+              }
+            }
+          } else if (theme?.generated && !settings.customBg) {
+            drawGeneratedBg(ctx, theme.generated, w, h, t);
+          } else {
+            if (alpha === 1) {
+              ctx.fillStyle = "#0B0F0E";
+              ctx.fillRect(0, 0, w, h);
+            }
           }
-        } else if (theme?.generated && !settings.customBg) {
-          drawGeneratedBg(ctx, theme.generated, w, h, t);
+          ctx.globalAlpha = 1.0;
+        };
+
+        const currentAyah = segments[segIdx]?.verse_key?.split(":")[1] || "global";
+        let vCurrent = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
+
+        if (isTransitioning) {
+          const prevAyah = segments[segIdx - 1]?.verse_key?.split(":")[1] || "global";
+          let vPrev = bgMediaRef.current[prevAyah] || bgMediaRef.current["global"];
+          drawMedia(vPrev, 1);
+          drawMedia(vCurrent, crossfadeProgress);
         } else {
-          ctx.fillStyle = "#0B0F0E";
-          ctx.fillRect(0, 0, w, h);
+          drawMedia(vCurrent, 1);
         }
         if (settings.overlayDarkness > 0) {
           ctx.fillStyle = `rgba(0,0,0,${settings.overlayDarkness})`;

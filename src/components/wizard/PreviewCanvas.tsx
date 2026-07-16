@@ -329,6 +329,13 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           clipBox = { x: (w - rectW) / 2, y: (h - rectH) / 2, w: rectW, h: rectH };
         }
 
+        if (typeof ctx.reset === "function") {
+          ctx.reset();
+        } else {
+          // Fallback for older browsers: force state reset by reassigning width
+          canvas.width = w;
+        }
+
         ctx.fillStyle = "#000000";
         ctx.fillRect(0, 0, w, h);
 

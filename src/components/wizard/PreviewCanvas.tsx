@@ -399,21 +399,19 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         const prevAyah = segments[segIdx - 1]?.verse_key?.split(":")[1] || "global";
         let vPrev = bgMediaRef.current[prevAyah] || bgMediaRef.current["global"];
 
-        // 1. Draw full screen background for all rounded/square frames
-        if (settings.frame === "blurred-glass" || settings.frame === "blurred-glass-square" || settings.frame === "rounded" || settings.frame === "rounded-square") {
+        // 1. Draw full screen background only for blurred frames
+        if (settings.frame === "blurred-glass" || settings.frame === "blurred-glass-square") {
           const fullBox = { x: 0, y: 0, w, h };
-          const isBlurred = settings.frame.includes("blurred");
           
           if (isTransitioning) {
-            drawMedia(vPrev, 1, fullBox, isBlurred ? 40 : 0, false);
-            drawMedia(vCurrent, crossfadeProgress, fullBox, isBlurred ? 40 : 0, false);
+            drawMedia(vPrev, 1, fullBox, 40, false);
+            drawMedia(vCurrent, crossfadeProgress, fullBox, 40, false);
           } else {
-            drawMedia(vCurrent, 1, fullBox, isBlurred ? 40 : 0, false);
+            drawMedia(vCurrent, 1, fullBox, 40, false);
           }
           
-          // Darken the background (both for blurred and black variants)
-          // For the "Black" variants, this creates the darkened "black" background effect over the unblurred video.
-          ctx.fillStyle = isBlurred ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.75)";
+          // Darken the blurred background
+          ctx.fillStyle = "rgba(0,0,0,0.5)";
           ctx.fillRect(0, 0, w, h);
         }
 

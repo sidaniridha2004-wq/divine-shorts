@@ -399,17 +399,21 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         const prevAyah = segments[segIdx - 1]?.verse_key?.split(":")[1] || "global";
         let vPrev = bgMediaRef.current[prevAyah] || bgMediaRef.current["global"];
 
-        // 1. Draw full screen blurred background for "blurred-glass" or "blurred-glass-square"
-        if (settings.frame === "blurred-glass" || settings.frame === "blurred-glass-square") {
+        // 1. Draw full screen background for all rounded/square frames
+        if (settings.frame === "blurred-glass" || settings.frame === "blurred-glass-square" || settings.frame === "rounded" || settings.frame === "rounded-square") {
           const fullBox = { x: 0, y: 0, w, h };
+          const isBlurred = settings.frame.includes("blurred");
+          
           if (isTransitioning) {
-            drawMedia(vPrev, 1, fullBox, 40, false);
-            drawMedia(vCurrent, crossfadeProgress, fullBox, 40, false);
+            drawMedia(vPrev, 1, fullBox, isBlurred ? 40 : 0, false);
+            drawMedia(vCurrent, crossfadeProgress, fullBox, isBlurred ? 40 : 0, false);
           } else {
-            drawMedia(vCurrent, 1, fullBox, 40, false);
+            drawMedia(vCurrent, 1, fullBox, isBlurred ? 40 : 0, false);
           }
-          // Darken the blurred background
-          ctx.fillStyle = "rgba(0,0,0,0.5)";
+          
+          // Darken the background (both for blurred and black variants)
+          // For the "Black" variants, this creates the darkened "black" background effect over the unblurred video.
+          ctx.fillStyle = isBlurred ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.75)";
           ctx.fillRect(0, 0, w, h);
         }
 
@@ -439,7 +443,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           ctx.clip();
         }
 
-        // 3. Draw main media inside clip box
+        // 3. Draw main media inside clip box (this is the bright, clear "window")
         if (isTransitioning) {
           drawMedia(vPrev, 1, clipBox, settings.blur, true);
           drawMedia(vCurrent, crossfadeProgress, clipBox, settings.blur, true);

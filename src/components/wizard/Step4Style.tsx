@@ -724,7 +724,7 @@ export function Step4Style() {
                   : "border-border bg-card"
               }`}
             >
-              {f}
+              {f === "none" ? "Full Screen" : f === "gold-thin" ? "Gold Border" : f === "rounded" ? "Rounded Box" : "Arch Window"}
             </button>
           ))}
         </div>

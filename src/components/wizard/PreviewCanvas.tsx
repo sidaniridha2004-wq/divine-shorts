@@ -309,6 +309,35 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         const isTransitioning = settings.bgMode === "per-ayah" && segIdx > 0 && timeInSeg >= 0 && timeInSeg < TRANSITION_DUR;
         const crossfadeProgress = isTransitioning ? timeInSeg / TRANSITION_DUR : 1;
 
+        let clipBox = { x: 0, y: 0, w, h };
+        if (settings.frame === "rounded") {
+          const rectW = w * 0.92;
+          const rectH = h * 0.40;
+          clipBox = { x: (w - rectW) / 2, y: (h - rectH) / 2, w: rectW, h: rectH };
+        } else if (settings.frame === "arch") {
+          const rectW = w * 0.85;
+          const rectH = h * 0.55;
+          clipBox = { x: (w - rectW) / 2, y: (h - rectH) / 2, w: rectW, h: rectH };
+        }
+
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, w, h);
+
+        ctx.save();
+        if (settings.frame === "rounded") {
+          ctx.beginPath();
+          ctx.roundRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h, Math.min(w, h) * 0.05);
+          ctx.clip();
+        } else if (settings.frame === "arch") {
+          ctx.beginPath();
+          ctx.moveTo(clipBox.x, clipBox.y + clipBox.w / 2);
+          ctx.arc(clipBox.x + clipBox.w / 2, clipBox.y + clipBox.w / 2, clipBox.w / 2, Math.PI, 0);
+          ctx.lineTo(clipBox.x + clipBox.w, clipBox.y + clipBox.h);
+          ctx.lineTo(clipBox.x, clipBox.y + clipBox.h);
+          ctx.closePath();
+          ctx.clip();
+        }
+
         const drawMedia = (v: HTMLVideoElement | HTMLImageElement | null, alpha: number) => {
           const vw = ((v as any)?.videoWidth ?? (v as HTMLImageElement)?.naturalWidth ?? 0) as number;
           const vh = ((v as any)?.videoHeight ?? (v as HTMLImageElement)?.naturalHeight ?? 0) as number;
@@ -321,26 +350,29 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           ctx.globalAlpha = alpha;
           if (wantsVideo && videoReady) {
             try {
-              const scale = Math.max(w / vw, h / vh) * (settings.kenBurns ? 1 + Math.sin(t * 0.05) * 0.05 + 0.05 : 1);
+              const scale = Math.max(clipBox.w / vw, clipBox.h / vh) * (settings.kenBurns ? 1 + Math.sin(t * 0.05) * 0.05 + 0.05 : 1);
               const dw = vw * scale;
               const dh = vh * scale;
-              const dx = (w - dw) / 2;
-              const dy = (h - dh) / 2;
+              const dx = clipBox.x + (clipBox.w - dw) / 2;
+              const dy = clipBox.y + (clipBox.h - dh) / 2;
               if (settings.blur > 0) ctx.filter = `blur(${settings.blur}px)`;
               ctx.drawImage(v as CanvasImageSource, dx, dy, dw, dh);
               ctx.filter = "none";
             } catch {
               if (alpha === 1) {
                 ctx.fillStyle = "#0B0F0E";
-                ctx.fillRect(0, 0, w, h);
+                ctx.fillRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h);
               }
             }
           } else if (theme?.generated && !settings.customBg) {
-            drawGeneratedBg(ctx, theme.generated, w, h, t);
+            ctx.save();
+            ctx.translate(clipBox.x, clipBox.y);
+            drawGeneratedBg(ctx, theme.generated, clipBox.w, clipBox.h, t);
+            ctx.restore();
           } else {
             if (alpha === 1) {
               ctx.fillStyle = "#0B0F0E";
-              ctx.fillRect(0, 0, w, h);
+              ctx.fillRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h);
             }
           }
           ctx.globalAlpha = 1.0;
@@ -359,21 +391,25 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         }
         if (settings.overlayDarkness > 0) {
           ctx.fillStyle = `rgba(0,0,0,${settings.overlayDarkness})`;
-          ctx.fillRect(0, 0, w, h);
+          ctx.fillRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h);
         }
         if (settings.vignette) {
-          const grad = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.3, w / 2, h / 2, Math.max(w, h) * 0.7);
+          const r1 = Math.min(clipBox.w, clipBox.h) * 0.3;
+          const r2 = Math.max(clipBox.w, clipBox.h) * 0.7;
+          const grad = ctx.createRadialGradient(clipBox.x + clipBox.w / 2, clipBox.y + clipBox.h / 2, r1, clipBox.x + clipBox.w / 2, clipBox.y + clipBox.h / 2, r2);
           grad.addColorStop(0, "rgba(0,0,0,0)");
           grad.addColorStop(1, "rgba(0,0,0,0.65)");
           ctx.fillStyle = grad;
-          ctx.fillRect(0, 0, w, h);
+          ctx.fillRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h);
         }
         if (settings.grain) {
           for (let i = 0; i < 400; i++) {
             ctx.fillStyle = `rgba(255,255,255,${Math.random() * 0.04})`;
-            ctx.fillRect(Math.random() * w, Math.random() * h, 1, 1);
+            ctx.fillRect(clipBox.x + Math.random() * clipBox.w, clipBox.y + Math.random() * clipBox.h, 1, 1);
           }
         }
+        
+        ctx.restore();
         if (settings.frame === "gold-thin") {
           ctx.strokeStyle = "#C9A227";
           ctx.lineWidth = Math.max(2, w * 0.006);

@@ -48,9 +48,9 @@ export function Step4Style() {
   const [q, setQ] = useState("");
   const [hoverId, setHoverId] = useState<string | null>(null);
 
-  // Media search state
   const [mediaProvider, setMediaProvider] = useState<"pexels" | "pixabay">("pexels");
   const [matchDuration, setMatchDuration] = useState(false);
+  const [audioLength, setAudioLength] = useState(0);
   const [pexelsQuery, setPexelsQuery] = useState("");
   const [pexelsType, setPexelsType] = useState<"video" | "photo">("video");
   const [pexelsVideoResults, setPexelsVideoResults] = useState<PexelsVideo[]>([]);
@@ -103,7 +103,12 @@ export function Step4Style() {
         if (startAyah && endAyah) {
           minDuration = (endAyah.end_time - startAyah.start_time) / 1000;
           if (settings.audioSpeed) minDuration /= settings.audioSpeed;
+          setAudioLength(minDuration);
+        } else {
+          setAudioLength(0);
         }
+      } else {
+        setAudioLength(0);
       }
 
       if (provider === "pexels") {
@@ -232,7 +237,7 @@ export function Step4Style() {
                   }}
                 />
                 <Label htmlFor="match-duration" className="text-xs cursor-pointer">
-                  Match Audio Length
+                  Match Audio Length {matchDuration && audioLength > 0 ? `(>= ${Math.ceil(audioLength)}s)` : ""}
                 </Label>
               </div>
             )}
@@ -358,7 +363,7 @@ export function Step4Style() {
                 >
                   {!hovering && (
                     <img
-                      src={`https://i.vimeocdn.com/video/${video.picture_id}_295x166.jpg`}
+                      src={video.videos?.tiny?.thumbnail || video.videos?.small?.thumbnail || `https://i.vimeocdn.com/video/${video.picture_id}_295x166.jpg`}
                       alt={`Video by ${video.user}`}
                       className="absolute inset-0 h-full w-full object-cover"
                       loading="lazy"

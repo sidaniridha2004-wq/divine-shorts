@@ -8,10 +8,10 @@ export type PixabayVideo = {
   duration: number;
   picture_id: string;
   videos: {
-    large?: { url: string; width: number; height: number; size: number };
-    medium?: { url: string; width: number; height: number; size: number };
-    small?: { url: string; width: number; height: number; size: number };
-    tiny?: { url: string; width: number; height: number; size: number };
+    large?: { url: string; width: number; height: number; size: number; thumbnail: string };
+    medium?: { url: string; width: number; height: number; size: number; thumbnail: string };
+    small?: { url: string; width: number; height: number; size: number; thumbnail: string };
+    tiny?: { url: string; width: number; height: number; size: number; thumbnail: string };
   };
   user: string;
   userImageURL: string;

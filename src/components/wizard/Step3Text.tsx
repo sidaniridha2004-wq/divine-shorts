@@ -219,6 +219,42 @@ export function Step3Text() {
           />
         </div>
       </div>
+
+      <div className="mt-6 mb-2 rounded-xl border bg-card p-4">
+        <Label className="mb-4 block font-semibold text-accent">Text Position & Scale</Label>
+        <div className="grid gap-6 sm:grid-cols-3">
+          <div>
+            <Label className="mb-2 block text-xs">Zoom ({(settings.textZoom || 1).toFixed(2)}x)</Label>
+            <Slider
+              value={[settings.textZoom || 1]}
+              min={0.5}
+              max={2.5}
+              step={0.05}
+              onValueChange={(v) => update({ textZoom: v[0] })}
+            />
+          </div>
+          <div>
+            <Label className="mb-2 block text-xs">Pan X ({(settings.textPanX || 0)}%)</Label>
+            <Slider
+              value={[settings.textPanX || 0]}
+              min={-100}
+              max={100}
+              step={1}
+              onValueChange={(v) => update({ textPanX: v[0] })}
+            />
+          </div>
+          <div>
+            <Label className="mb-2 block text-xs">Pan Y ({(settings.textPanY || 0)}%)</Label>
+            <Slider
+              value={[settings.textPanY || 0]}
+              min={-100}
+              max={100}
+              step={1}
+              onValueChange={(v) => update({ textPanY: v[0] })}
+            />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

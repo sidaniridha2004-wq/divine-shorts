@@ -777,7 +777,7 @@ export function Step4Style() {
       <div>
         <Label className="mb-2 block">Frame</Label>
         <div className="flex flex-wrap gap-2">
-          {(["none", "gold-thin", "arch", "rounded", "blurred-glass"] as const).map((f) => (
+          {(["none", "gold-thin", "arch", "rounded", "blurred-glass", "rounded-square", "blurred-glass-square"] as const).map((f) => (
             <button
               key={f}
               type="button"
@@ -788,7 +788,7 @@ export function Step4Style() {
                   : "border-border bg-card"
               }`}
             >
-              {f === "none" ? "Full Screen" : f === "gold-thin" ? "Gold Border" : f === "rounded" ? "Rounded Center (Black)" : f === "blurred-glass" ? "Rounded Center (Blurred)" : "Arch Window"}
+              {f === "none" ? "Full Screen" : f === "gold-thin" ? "Gold Border" : f === "rounded" ? "Narrow (Black)" : f === "blurred-glass" ? "Narrow (Blurred)" : f === "rounded-square" ? "Square (Black)" : f === "blurred-glass-square" ? "Square (Blurred)" : "Arch Window"}
             </button>
           ))}
         </div>

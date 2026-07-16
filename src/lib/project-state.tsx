@@ -24,6 +24,9 @@ export type ProjectSettings = {
   showAyahNumber: boolean;
   ayahNumberStyle: "none" | "bracket" | "ornate";
   textColor: string;
+  textZoom: number;
+  textPanX: number;
+  textPanY: number;
   letterSpacing: number;
   lineHeight: number;
   textShadow: boolean;
@@ -47,7 +50,7 @@ export type ProjectSettings = {
   grain: boolean;
   kenBurns: boolean;
   watermark: { type: "none" | "logo" | "text"; text: string; position: "tl" | "tr" | "bl" | "br" };
-  frame: "none" | "gold-thin" | "arch" | "rounded" | "blurred-glass";
+  frame: "none" | "gold-thin" | "arch" | "rounded" | "blurred-glass" | "rounded-square" | "blurred-glass-square";
   // Format
   aspect: AspectRatio;
   resolution: 720 | 1080;
@@ -72,6 +75,9 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   showAyahNumber: true,
   ayahNumberStyle: "ornate",
   textColor: "#F5F1E8",
+  textZoom: 1,
+  textPanX: 0,
+  textPanY: 0,
   letterSpacing: 0,
   lineHeight: 1.9,
   textShadow: true,

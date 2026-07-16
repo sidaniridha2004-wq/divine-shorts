@@ -319,6 +319,10 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           const rectW = w * 0.95;
           const rectH = rectW * (9 / 16); // 16:9 aspect ratio makes it vertically narrow
           clipBox = { x: (w - rectW) / 2, y: (h - rectH) / 2, w: rectW, h: rectH };
+        } else if (settings.frame === "rounded-square" || settings.frame === "blurred-glass-square") {
+          const rectW = w * 0.95;
+          const rectH = rectW; // 1:1 aspect ratio
+          clipBox = { x: (w - rectW) / 2, y: (h - rectH) / 2, w: rectW, h: rectH };
         } else if (settings.frame === "arch") {
           const rectW = w * 0.85;
           const rectH = h * 0.55;
@@ -388,8 +392,8 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         const prevAyah = segments[segIdx - 1]?.verse_key?.split(":")[1] || "global";
         let vPrev = bgMediaRef.current[prevAyah] || bgMediaRef.current["global"];
 
-        // 1. Draw full screen blurred background for "blurred-glass"
-        if (settings.frame === "blurred-glass") {
+        // 1. Draw full screen blurred background for "blurred-glass" or "blurred-glass-square"
+        if (settings.frame === "blurred-glass" || settings.frame === "blurred-glass-square") {
           const fullBox = { x: 0, y: 0, w, h };
           if (isTransitioning) {
             drawMedia(vPrev, 1, fullBox, 40, false);
@@ -404,7 +408,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
 
         // 2. Setup clip box for the main media
         ctx.save();
-        if (settings.frame === "rounded" || settings.frame === "blurred-glass") {
+        if (settings.frame === "rounded" || settings.frame === "blurred-glass" || settings.frame === "rounded-square" || settings.frame === "blurred-glass-square") {
           ctx.beginPath();
           ctx.roundRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h, Math.min(w, h) * 0.05);
           ctx.clip();
@@ -824,7 +828,7 @@ function drawText(
     currentVerse.translations?.[0]?.text?.replace(/<[^>]*>/g, "") ?? "";
 
   let maxW = w * (s.maxWidthPct / 100);
-  const centerX = w / 2;
+  const centerX = w / 2 + ((s.textPanX || 0) / 100) * w;
   let baseY = h / 2;
   if (s.layout === "bottom-third") {
     baseY = h * 0.72;
@@ -837,6 +841,7 @@ function drawText(
   } else if (s.layout === "split") {
     baseY = h * 0.35;
   }
+  baseY += ((s.textPanY || 0) / 100) * h;
 
   let alpha = 1;
   if (seg) {
@@ -849,6 +854,15 @@ function drawText(
 
   const arabicFont = ARABIC_FONTS.find((f) => f.id === s.arabicFont)?.css ?? "'Amiri', serif";
   const sizeScale = w / 1080;
+  
+  ctx.save();
+  const textZoom = s.textZoom || 1;
+  if (textZoom !== 1) {
+    ctx.translate(centerX, baseY);
+    ctx.scale(textZoom, textZoom);
+    ctx.translate(-centerX, -baseY);
+  }
+
   ctx.textAlign = "center";
   ctx.fillStyle = s.textColor;
   if (s.textShadow) {
@@ -898,6 +912,7 @@ function drawText(
 
   ctx.shadowBlur = 0;
   ctx.globalAlpha = 1;
+  ctx.restore();
 }
 
 function wrapText(ctx: CanvasRenderingContext2D, text: string, maxW: number): string[] {

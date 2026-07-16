@@ -54,9 +54,10 @@ export function WizardShell() {
       const randChapterIdx = randomVals[0] % chapters.length;
       const randChapter = chapters[randChapterIdx];
       
-      const maxFrom = Math.max(1, randChapter.verses_count - 2);
+      const maxFrom = Math.max(1, randChapter.verses_count);
       const randFrom = (randomVals[1] % maxFrom) + 1;
-      const randTo = Math.min(randChapter.verses_count, randFrom + (randomVals[2] % 4));
+      const numAyahs = (randomVals[2] % 10) + 1; // 1 to 10 ayahs
+      const randTo = Math.min(randChapter.verses_count, randFrom + numAyahs - 1);
 
       update({
         chapterId: randChapter.id,

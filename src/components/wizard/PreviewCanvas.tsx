@@ -316,8 +316,8 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
 
         let clipBox = { x: 0, y: 0, w, h };
         if (settings.frame === "rounded" || settings.frame === "blurred-glass") {
-          const rectW = w * 0.92;
-          const rectH = h * 0.40;
+          const rectW = w * 0.95;
+          const rectH = rectW * (9 / 16); // 16:9 aspect ratio makes it vertically narrow
           clipBox = { x: (w - rectW) / 2, y: (h - rectH) / 2, w: rectW, h: rectH };
         } else if (settings.frame === "arch") {
           const rectW = w * 0.85;

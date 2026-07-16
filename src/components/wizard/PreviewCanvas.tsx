@@ -130,7 +130,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
   function PreviewCanvas({ onProgress }, ref) {
     const { settings } = useProjectState();
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const videoRef = useRef<HTMLVideoElement | HTMLImageElement | null>(null);
+    const bgMediaRef = useRef<Record<string, HTMLVideoElement | HTMLImageElement>>({});
     const reciterAudioRef = useRef<HTMLAudioElement>(null);
     const ambientRef = useRef<HTMLAudioElement>(null);
     const rafRef = useRef<number | null>(null);
@@ -227,45 +227,51 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
 
     // Load background
     useEffect(() => {
+      bgMediaRef.current = {};
       const theme = THEMES.find((t) => t.id === settings.themeId);
-      videoRef.current = null;
 
-      const loadImage = (src: string) => {
+      const loadImage = (src: string, key: string) => {
         const img = new Image();
         img.crossOrigin = "anonymous";
         img.onload = () => {
-          if (!videoRef.current || !(videoRef.current instanceof HTMLVideoElement)) {
-            (videoRef as any).current = img;
+          if (!bgMediaRef.current[key] || !(bgMediaRef.current[key] instanceof HTMLVideoElement)) {
+            bgMediaRef.current[key] = img;
           }
         };
         img.src = src;
       };
 
-      const loadVideo = (src: string) => {
+      const loadVideo = (src: string, key: string) => {
         const v = document.createElement("video");
         v.crossOrigin = "anonymous";
         v.muted = true;
         v.loop = true;
         v.playsInline = true;
         v.onloadeddata = () => {
-          videoRef.current = v;
+          bgMediaRef.current[key] = v;
           v.play().catch(() => {});
         };
         v.onerror = () => {};
         v.src = src;
       };
 
-      if (settings.customBg) {
-        if (settings.customBg.startsWith("data:video") || /\.(mp4|webm|mov)/i.test(settings.customBg)) {
-          loadVideo(settings.customBg);
-        } else {
-          loadImage(settings.customBg);
+      if (settings.bgMode === "per-ayah") {
+        Object.entries(settings.ayahBgs).forEach(([ayahNum, src]) => {
+          if (src) loadImage(src, ayahNum);
+        });
+      } else {
+        if (settings.customBg) {
+          if (settings.customBg.startsWith("data:video") || /\.(mp4|webm|mov)/i.test(settings.customBg)) {
+            loadVideo(settings.customBg, "global");
+          } else {
+            loadImage(settings.customBg, "global");
+          }
+        } else if (theme?.poster) {
+          loadImage(theme.poster, "global");
+          if (theme.video) loadVideo(theme.video, "global");
         }
-      } else if (theme?.poster) {
-        loadImage(theme.poster);
-        if (theme.video) loadVideo(theme.video);
       }
-    }, [settings.themeId, settings.customBg]);
+    }, [settings.bgMode, settings.ayahBgs, settings.themeId, settings.customBg]);
 
     // Ambient track logic
     useEffect(() => {
@@ -296,13 +302,18 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           canvas.width = w;
           canvas.height = h;
         }
-        const theme = THEMES.find((th) => th.id === settings.themeId);
-        const v = videoRef.current as HTMLVideoElement | HTMLImageElement | null;
+
+        const currentAyah = segments[segIdx]?.verse_key?.split(":")[1] || "global";
+        let v = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
+        
         const vw = ((v as any)?.videoWidth ?? (v as HTMLImageElement)?.naturalWidth ?? 0) as number;
         const vh = ((v as any)?.videoHeight ?? (v as HTMLImageElement)?.naturalHeight ?? 0) as number;
         const isVideo = v && 'readyState' in v;
         const videoReady = !!v && vw > 0 && vh > 0 && (!isVideo || (v as HTMLVideoElement).readyState >= 2);
-        const wantsVideo = !!settings.customBg || !!theme?.video;
+        
+        const theme = THEMES.find((th) => th.id === settings.themeId);
+        const wantsVideo = !!settings.customBg || !!theme?.video || settings.bgMode === "per-ayah";
+        
         if (wantsVideo && videoReady) {
           try {
             const scale = Math.max(w / vw, h / vh) * (settings.kenBurns ? 1 + Math.sin(t * 0.05) * 0.05 + 0.05 : 1);
@@ -501,8 +512,11 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           let idx = segments.findIndex(sg => targetAbsTime >= sg.start && targetAbsTime < (sg.start + sg.duration));
           if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
           
-          if (videoRef.current instanceof HTMLVideoElement) {
-            const v = videoRef.current;
+          const currentAyah = segments[idx]?.verse_key?.split(":")[1] || "global";
+          let activeBg = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
+          
+          if (activeBg instanceof HTMLVideoElement) {
+            const v = activeBg;
             if (isExporting) {
               if (v.readyState > 0) {
                 v.pause(); // Crucial to prevent decoder artifacts
@@ -537,8 +551,11 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           let idx = segments.findIndex(sg => targetAbsTime >= sg.absoluteStart && targetAbsTime < sg.absoluteEnd);
           if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
           
-          if (videoRef.current instanceof HTMLVideoElement) {
-            const v = videoRef.current;
+          const currentAyah = segments[idx]?.verse_key?.split(":")[1] || "global";
+          let activeBg = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
+
+          if (activeBg instanceof HTMLVideoElement) {
+            const v = activeBg;
             if (v.readyState > 0) {
               v.currentTime = clamped % v.duration;
               await new Promise<void>(r => {

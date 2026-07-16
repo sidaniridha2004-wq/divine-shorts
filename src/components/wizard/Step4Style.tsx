@@ -60,6 +60,15 @@ export function Step4Style() {
   const [pexelsLoading, setPexelsLoading] = useState(false);
   const [pexelsHoverId, setPexelsHoverId] = useState<number | null>(null);
   const [selectedPexelsId, setSelectedPexelsId] = useState<number | null>(null);
+  const [selectedAyah, setSelectedAyah] = useState<number | null>(null);
+
+  // Initialize selectedAyah if per-ayah mode is active
+  useEffect(() => {
+    if (settings.bgMode === "per-ayah" && selectedAyah === null) {
+      setSelectedAyah(settings.fromAyah);
+      setPexelsType("photo");
+    }
+  }, [settings.bgMode, selectedAyah, settings.fromAyah]);
 
   const shown = useMemo(() => {
     let list = THEMES;
@@ -161,9 +170,14 @@ export function Step4Style() {
   };
 
   const selectPexelsPhoto = (photo: PexelsPhoto) => {
-    update({ customBg: photo.src.large2x });
-    setSelectedPexelsId(photo.id);
-    toast.success(`Background: Pexels photo by ${photo.photographer}`);
+    if (settings.bgMode === "per-ayah" && selectedAyah !== null) {
+      update({ ayahBgs: { ...settings.ayahBgs, [selectedAyah]: photo.src.large2x } });
+      toast.success(`Ayah ${selectedAyah}: Pexels photo`);
+    } else {
+      update({ customBg: photo.src.large2x });
+      setSelectedPexelsId(photo.id);
+      toast.success(`Background: Pexels photo by ${photo.photographer}`);
+    }
   };
 
   const selectPixabayVideo = (video: PixabayVideo) => {
@@ -178,9 +192,14 @@ export function Step4Style() {
   };
 
   const selectPixabayPhoto = (photo: PixabayPhoto) => {
-    update({ customBg: photo.largeImageURL });
-    setSelectedPexelsId(photo.id);
-    toast.success(`Background: Pixabay photo by ${photo.user}`);
+    if (settings.bgMode === "per-ayah" && selectedAyah !== null) {
+      update({ ayahBgs: { ...settings.ayahBgs, [selectedAyah]: photo.largeImageURL } });
+      toast.success(`Ayah ${selectedAyah}: Pixabay photo`);
+    } else {
+      update({ customBg: photo.largeImageURL });
+      setSelectedPexelsId(photo.id);
+      toast.success(`Background: Pixabay photo by ${photo.user}`);
+    }
   };
 
   // Load initial suggestions on mount
@@ -192,6 +211,60 @@ export function Step4Style() {
 
   return (
     <div className="space-y-6">
+      {/* ── Background Mode ─────────────────────────────────── */}
+      <div className="flex flex-col gap-3 border-b border-border pb-6">
+        <div className="flex items-center gap-4">
+          <Label>Background Mode</Label>
+          <div className="flex gap-2">
+            {(["global", "per-ayah"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => {
+                  update({ bgMode: mode });
+                  if (mode === "per-ayah") {
+                    setPexelsType("photo"); // Force photo search
+                    setSelectedAyah(settings.fromAyah);
+                    if (pexelsQuery) searchMedia(pexelsQuery, "photo", mediaProvider, false);
+                  }
+                }}
+                className={`rounded-md border px-4 py-1.5 text-xs capitalize transition ${
+                  settings.bgMode === mode
+                    ? "border-accent bg-accent/20 text-accent font-medium"
+                    : "border-border bg-card text-muted-foreground hover:border-accent/50"
+                }`}
+              >
+                {mode.replace("-", " ")}
+              </button>
+            ))}
+          </div>
+        </div>
+        
+        {settings.bgMode === "per-ayah" && (
+          <div className="space-y-3">
+            <Label className="text-xs text-muted-foreground">Select Ayah to customize</Label>
+            <div className="flex flex-wrap gap-2">
+              {Array.from({ length: settings.toAyah - settings.fromAyah + 1 }, (_, i) => settings.fromAyah + i).map(ayahNum => (
+                <button
+                  key={ayahNum}
+                  type="button"
+                  onClick={() => setSelectedAyah(ayahNum)}
+                  className={`rounded-md border px-3 py-1.5 text-xs transition ${
+                    selectedAyah === ayahNum
+                      ? "border-accent bg-accent text-black font-medium shadow-gold"
+                      : settings.ayahBgs[ayahNum] 
+                        ? "border-accent/50 bg-accent/10 text-accent" 
+                        : "border-border bg-card text-muted-foreground hover:border-accent/50"
+                  }`}
+                >
+                  Ayah {ayahNum}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* ── Media Search ─────────────────────────────────── */}
       <div>
         <div className="mb-3 flex items-center justify-between gap-3">
@@ -210,6 +283,7 @@ export function Step4Style() {
               <button
                 key={t}
                 type="button"
+                disabled={settings.bgMode === "per-ayah" && t === "video"}
                 onClick={() => {
                   setPexelsType(t);
                   if (pexelsQuery) searchMedia(pexelsQuery, t, mediaProvider, matchDuration);
@@ -218,7 +292,7 @@ export function Step4Style() {
                   pexelsType === t
                     ? "border-accent bg-accent/20 text-accent font-medium"
                     : "border-border bg-card text-muted-foreground hover:border-accent/50"
-                }`}
+                } ${settings.bgMode === "per-ayah" && t === "video" ? "opacity-30 cursor-not-allowed" : ""}`}
               >
                 {t}s
               </button>

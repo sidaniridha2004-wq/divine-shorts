@@ -35,6 +35,8 @@ export type ProjectSettings = {
   // Style
   themeId: string;
   customBg: string | null;
+  bgMode: "global" | "per-ayah";
+  ayahBgs: Record<number, string>;
   overlayDarkness: number; // 0..0.8
   blur: number; // 0..20
   vignette: boolean;
@@ -74,8 +76,10 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   platformStyle: "default",
   animation: "fade",
   animationSpeed: 1,
-  themeId: "stars",
+  themeId: "desert-dune",
   customBg: null,
+  bgMode: "global",
+  ayahBgs: {},
   overlayDarkness: 0.4,
   blur: 0,
   vignette: true,

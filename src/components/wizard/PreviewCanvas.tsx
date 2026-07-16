@@ -409,8 +409,18 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         // 2. Setup clip box for the main media
         ctx.save();
         if (settings.frame === "rounded" || settings.frame === "blurred-glass" || settings.frame === "rounded-square" || settings.frame === "blurred-glass-square") {
+          const r = Math.min(w, h) * 0.05;
           ctx.beginPath();
-          ctx.roundRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h, Math.min(w, h) * 0.05);
+          ctx.moveTo(clipBox.x + r, clipBox.y);
+          ctx.lineTo(clipBox.x + clipBox.w - r, clipBox.y);
+          ctx.quadraticCurveTo(clipBox.x + clipBox.w, clipBox.y, clipBox.x + clipBox.w, clipBox.y + r);
+          ctx.lineTo(clipBox.x + clipBox.w, clipBox.y + clipBox.h - r);
+          ctx.quadraticCurveTo(clipBox.x + clipBox.w, clipBox.y + clipBox.h, clipBox.x + clipBox.w - r, clipBox.y + clipBox.h);
+          ctx.lineTo(clipBox.x + r, clipBox.y + clipBox.h);
+          ctx.quadraticCurveTo(clipBox.x, clipBox.y + clipBox.h, clipBox.x, clipBox.y + clipBox.h - r);
+          ctx.lineTo(clipBox.x, clipBox.y + r);
+          ctx.quadraticCurveTo(clipBox.x, clipBox.y, clipBox.x + r, clipBox.y);
+          ctx.closePath();
           ctx.clip();
         } else if (settings.frame === "arch") {
           ctx.beginPath();

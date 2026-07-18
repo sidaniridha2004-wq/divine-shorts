@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
+import { UserMenu } from "@/components/UserMenu";
 import {
   Accordion,
   AccordionContent,

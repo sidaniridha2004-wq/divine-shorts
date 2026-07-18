@@ -61,11 +61,14 @@ function Nav() {
             My projects
           </Link>
         </nav>
-        <Link to="/create">
-          <Button className="bg-accent text-accent-foreground hover:opacity-90">
-            Create video
-          </Button>
-        </Link>
+        <div className="flex items-center gap-2">
+          <UserMenu />
+          <Link to="/create">
+            <Button className="bg-accent text-accent-foreground hover:opacity-90">
+              Create video
+            </Button>
+          </Link>
+        </div>
       </div>
     </header>
   );

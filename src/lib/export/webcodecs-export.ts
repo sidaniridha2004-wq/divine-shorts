@@ -1,6 +1,6 @@
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 import type { PreviewHandle } from "@/components/wizard/PreviewCanvas";
-import type { ProjectSettings } from "@/types";
+import type { ProjectSettings } from "@/lib/project-state";
 
 export type ExportProgress = {
   phase: "preparing" | "recording" | "encoding" | "done";

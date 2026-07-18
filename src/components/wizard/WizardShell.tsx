@@ -11,6 +11,7 @@ import { useProjectState } from "@/lib/project-state";
 import { RECITERS } from "@/lib/reciters";
 import { THEMES } from "@/lib/themes";
 import { getChapters, POPULAR_MP3QURAN_IDS } from "@/lib/quran-api";
+import { UserMenu } from "@/components/UserMenu";
 
 const STEPS = [
   { id: 1, title: "Verse", desc: "Pick a surah and ayahs" },
@@ -92,6 +93,7 @@ export function WizardShell() {
             >
               My projects
             </a>
+            <UserMenu />
           </div>
         </div>
       </header>

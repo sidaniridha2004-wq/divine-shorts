@@ -11,6 +11,7 @@ import { THEMES, type GeneratedTheme } from "@/lib/themes";
 import { ARABIC_FONTS } from "@/lib/translations";
 import { getVersesByChapter, getAyahTimings, getMp3QuranReciters, type Verse } from "@/lib/quran-api";
 import { AMBIENT_TRACKS } from "@/lib/reciters";
+import { isProNow } from "@/lib/pro-status";
 
 export interface PreviewHandle {
   play: () => Promise<void>;
@@ -477,22 +478,24 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           const m = w * 0.03;
           ctx.strokeRect(m, m, w - m * 2, h - m * 2);
         }
-        if (settings.watermark.type !== "none") {
-          const label =
-            settings.watermark.type === "logo" ? "QuranReels" : settings.watermark.text || "";
+        // Free users always get a "QuranReels" watermark; Pro users can customize or hide it.
+        const pro = isProNow();
+        const wm = pro
+          ? settings.watermark
+          : { type: "text" as const, text: "QuranReels", position: "br" as const };
+        if (wm.type !== "none") {
+          const label = wm.type === "logo" ? "QuranReels" : wm.text || "";
           if (label) {
             ctx.font = `${Math.round(w * 0.022)}px Inter, sans-serif`;
-            ctx.fillStyle = "rgba(245,241,232,0.6)";
+            ctx.fillStyle = pro ? "rgba(245,241,232,0.6)" : "rgba(245,241,232,0.85)";
             ctx.textAlign = "left";
             const pad = w * 0.04;
             const tx =
-              settings.watermark.position === "tl" || settings.watermark.position === "bl"
+              wm.position === "tl" || wm.position === "bl"
                 ? pad
                 : w - pad - ctx.measureText(label).width;
             const ty =
-              settings.watermark.position === "tl" || settings.watermark.position === "tr"
-                ? pad + 20
-                : h - pad;
+              wm.position === "tl" || wm.position === "tr" ? pad + 20 : h - pad;
             ctx.fillText(label, tx, ty);
           }
         }

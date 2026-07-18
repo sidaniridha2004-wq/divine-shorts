@@ -1,113 +1,65 @@
-# QuranReels Pro — Build Plan
+# IBAN Payment + Pro Unlock
 
-A Quran verse video generator with a 5-step wizard, MP4 export, and 4 pages. Design system, palette, and typography per your spec (dark-first, emerald/gold, Playfair + Inter, Arabic RTL).
+## What users experience
 
-## Scope & Priorities
+1. Free users can use the wizard, but export adds a "QuranReels" watermark and is capped at 720p.
+2. On the Export step (and via a new "Upgrade" button in the header), a **Get Pro** page opens showing:
+   - Price (default €9.99 — editable)
+   - Bank details: Account holder, IBAN, BIC/SWIFT, Bank name (all placeholders — you edit in `src/lib/payment-config.ts`)
+   - A unique **payment reference** (e.g. `QR-<userid8>-<random4>`) they must include in the transfer
+   - Copy buttons for every field
+   - Upload area for the transfer receipt (image or PDF, ≤ 5 MB)
+   - After upload → "Your payment is pending review. You'll get Pro access once we confirm the transfer (usually within 24h)."
+3. Once you approve them, watermark disappears and 1080p unlocks. A **Pro** badge shows in the header.
 
-Because of the size, I'll build in a strict order — end-to-end pipeline first, polish second. If any single feature can't reasonably fit in an MVP (e.g. word-level timing accuracy on every reciter), I'll ship a working approximation and flag it, rather than blocking the build.
+## Admin experience (you)
 
-**Phase 1 — Preview/export pipeline (highest priority)**
-- Verse selection → Reciter → Style → Live preview with synced audio → MP4 export
-- ffmpeg.wasm export with WebM/MediaRecorder fallback
-- Everything else stubbed but navigable
+A new `/admin` page (only visible to users with the `admin` role):
+- Table of all payment submissions: user email, reference, submitted date, status, receipt preview
+- Buttons per row: **Approve** (grants Pro), **Reject** (with optional note), **View receipt**
+- After the first admin exists, you can promote more admins from this page.
 
-**Phase 2 — Full editor breadth**
-- All 15 themes, all text controls, translations, transliteration, layout presets, animation styles
-- Adjustments (darkness/blur/vignette/grain/Ken Burns), watermark, frames
-- Aspect ratios + resolutions
+## Data model (Lovable Cloud)
 
-**Phase 3 — Surrounding pages & polish**
-- Landing (hero, features, how-it-works, gallery, FAQ, footer)
-- My Projects (localStorage-backed)
-- Verse of the Day (deterministic by date)
-- Surprise Me, share link, recent styles, caption generator
-- Skeletons, toasts, error states, responsive mobile stepper, light-mode toggle
+- `app_role` enum: `admin`, `user`
+- `user_roles(user_id, role)` — separate table, secured via `has_role()` SECURITY DEFINER function (never store role on profiles)
+- `profiles(id, email, is_pro boolean, pro_since timestamptz)` — auto-created on signup via trigger
+- `payment_submissions(id, user_id, reference, amount, currency, receipt_path, status: pending|approved|rejected, admin_note, created_at, reviewed_at, reviewed_by)`
+- Storage bucket `payment-receipts` (private). RLS: users can upload/read their own; admins can read all.
+- RLS everywhere; explicit GRANTs on all public tables.
 
-## Pages / Routes
+## Auth
 
-```
-/                → Landing
-/create          → 5-step wizard (main app)
-/projects        → Saved drafts grid
-/daily           → Verse of the Day
-```
+- Email/password + Google (Lovable Cloud defaults)
+- `/auth` route with sign-in / sign-up tabs
+- The wizard stays usable without auth; only the "Get Pro" and "Export without watermark" paths require an account.
 
-## Technical Approach
+## Gating
 
-- **Data**: Quran.com API v4 (`api.quran.com/api/v4`) — chapters, verses (`text_uthmani`), translations, recitations, word-timing where available. Surah list cached in localStorage.
-- **Storage**: All projects as JSON in localStorage under `quranreels:projects`. Schema designed for later Supabase migration (each project already has a UUID, timestamps, and versioned settings blob).
-- **Preview**: A `<canvas>` sized to selected aspect ratio, rendered via `requestAnimationFrame`. Background video drawn each frame, text layers composited on top with CSS-like transforms. Audio is a separate `<audio>` element synced by `currentTime`.
-- **Export**:
-  1. Capture canvas frames at 30fps into an in-memory buffer while playing the audio silently.
-  2. Feed frames + audio into `ffmpeg.wasm` → MP4 (H.264 + AAC).
-  3. On any failure, fall back to `MediaRecorder` on `canvas.captureStream()` merged with an `AudioContext` destination stream → WebM. Toast informs the user of the fallback format.
-- **Themes**: Free Pexels/Coverr `.mp4` URLs for 13 stock loops + 2 canvas-generated (dark gradient, gold particles). Preloaded and validated before Export button enables.
-- **Fonts**: Google Fonts `<link>` in `__root.tsx` head — Playfair Display, Inter, Amiri, Scheherazade New, Noto Naskh Arabic, Lateef. KFGQPC Uthmani via a CDN webfont URL.
-- **RTL**: Arabic text always in a wrapper with `dir="rtl"` and correct font stack; never split characters.
+- `useProStatus()` hook reads `profiles.is_pro` for the signed-in user (React Query).
+- `PreviewCanvas` draws the "QuranReels" watermark unless `isPro` is true.
+- Export step: `resolution` selector locks 1080p behind Pro; free users get 720p only.
 
-## Design System (src/styles.css)
+## First-admin bootstrap
 
-- `--background: oklch(0.14 0.01 150)` (#0B0F0E-ish)
-- `--primary: oklch(0.38 0.09 155)` (deep emerald #0F5132)
-- `--accent: oklch(0.75 0.13 85)` (gold #C9A227)
-- `--foreground: oklch(0.95 0.02 85)` (off-white #F5F1E8)
-- Islamic-geometric SVG as low-opacity `background-image` utility class
-- Custom shadcn button variants: `hero` (gold), `emerald`, `ghost-gold`
-- Skeleton, toast (sonner), accordion (radix) — all themed
+The first user to sign up whose email matches `ADMIN_EMAIL` (config value you set in `src/lib/payment-config.ts`) is auto-promoted to admin by a Postgres trigger. Once you're in `/admin`, you can promote others.
 
-## File Layout (new)
+## Files added / changed
 
-```
-src/routes/
-  index.tsx                    (landing — rewritten)
-  create.tsx                   (wizard shell)
-  projects.tsx
-  daily.tsx
-src/components/
-  landing/{Hero,Features,HowItWorks,Gallery,FAQ,Footer}.tsx
-  wizard/
-    WizardShell.tsx            (stepper + canvas + nav)
-    Step1Verse.tsx
-    Step2Reciter.tsx
-    Step3Text.tsx
-    Step4Style.tsx
-    Step5Export.tsx
-    PreviewCanvas.tsx          (canvas renderer)
-    useProjectState.ts         (zustand-like context)
-  ui/*                          (existing shadcn)
-src/lib/
-  quran-api.ts                 (fetch + cache)
-  themes.ts                    (15 theme definitions)
-  reciters.ts
-  translations.ts
-  fonts.ts
-  export/
-    ffmpeg-export.ts
-    mediarecorder-export.ts
-    frame-capture.ts
-  projects-store.ts            (localStorage CRUD)
-  caption.ts                   (share caption generator)
-src/assets/patterns/geometric.svg
-```
+- `src/lib/payment-config.ts` — **you edit this**: IBAN, account holder, BIC, bank name, price, currency, admin email
+- `src/lib/pro-status.ts` — `useProStatus` hook
+- `src/routes/auth.tsx` — sign-in / sign-up
+- `src/routes/pro.tsx` — Get Pro page (bank details, reference, receipt upload)
+- `src/routes/admin.tsx` — admin dashboard (role-gated)
+- `src/components/UserMenu.tsx` — header account chip (sign in / Pro badge / admin link / sign out)
+- Landing + wizard headers get the account chip
+- `Step5Export.tsx` — 1080p locked for free users, watermark note
+- `PreviewCanvas.tsx` — watermark for free users
+- Migrations: enums, tables, RLS, GRANTs, storage bucket, triggers
 
-## Known Trade-offs
+## Out of scope (say the word if you want any of these)
 
-- **Word-level animation** uses Quran.com per-word timing when the reciter provides it; otherwise falls back to per-ayah fade. Not every reciter has segments.
-- **ffmpeg.wasm** is ~30MB; loaded lazily on Step 5 only, with a progress indicator.
-- **Reciter photos** are placeholder gradient avatars with initials (no reliable free photo source).
-- **Share preview link** encodes project JSON into the URL (base64) — no server needed; long URLs are acceptable for this MVP.
-- **Custom uploads** validated client-side (image ≤10MB, video ≤50MB, mp4/webm/jpg/png).
-- **Auth / cloud sync**: out of scope for this build; code structured so a later `projects-store` swap to Supabase is a single-file change.
-
-## Verification Before I Finish
-
-1. Landing page renders with hero video mockup and all sections.
-2. `/create` wizard walks through all 5 steps with state persisted.
-3. Live preview plays audio synced with Arabic + translation on a themed video background.
-4. Export produces a downloadable MP4 (or WebM fallback) with correct aspect ratio.
-5. Project saves to `/projects`, reloads, duplicates, deletes.
-6. `/daily` shows a deterministic verse and "Make video" deep-links into `/create` with that verse preselected.
-7. Mobile viewport: editor collapses to bottom-tab stepper with preview pinned top.
-8. No hardcoded colors in components — all via design tokens.
-
-Once you approve, I'll start with the design system + routing shell, then the wizard skeleton + preview canvas, then export, then landing/projects/daily, then polish.
+- Automatic bank feed reconciliation (would need a bank API — IBAN alone can't auto-verify)
+- Subscriptions / renewals
+- Refund flow
+- Email notifications on approval (can add via Resend if you want)

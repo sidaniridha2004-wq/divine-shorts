@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
+import { UserMenu } from "@/components/UserMenu";
 import {
   Accordion,
   AccordionContent,
@@ -61,11 +62,14 @@ function Nav() {
             My projects
           </Link>
         </nav>
-        <Link to="/create">
-          <Button className="bg-accent text-accent-foreground hover:opacity-90">
-            Create video
-          </Button>
-        </Link>
+        <div className="flex items-center gap-2">
+          <UserMenu />
+          <Link to="/create">
+            <Button className="bg-accent text-accent-foreground hover:opacity-90">
+              Create video
+            </Button>
+          </Link>
+        </div>
       </div>
     </header>
   );

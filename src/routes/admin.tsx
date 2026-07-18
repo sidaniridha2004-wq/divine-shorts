@@ -42,12 +42,22 @@ function AdminPage() {
   const load = async () => {
     let q = supabase
       .from("payment_submissions")
-      .select("*, profiles(email)")
+      .select("*")
       .order("created_at", { ascending: false });
     if (filter !== "all") q = q.eq("status", filter);
     const { data, error } = await q;
-    if (error) toast.error(error.message);
-    else setRows((data as Row[]) || []);
+    if (error) {
+      toast.error(error.message);
+      return;
+    }
+    const subs = (data as Omit<Row, "profiles">[]) || [];
+    const ids = Array.from(new Set(subs.map((s) => s.user_id)));
+    let emailMap: Record<string, string | null> = {};
+    if (ids.length) {
+      const { data: profs } = await supabase.from("profiles").select("id, email").in("id", ids);
+      emailMap = Object.fromEntries((profs || []).map((p: any) => [p.id, p.email]));
+    }
+    setRows(subs.map((s) => ({ ...s, profiles: { email: emailMap[s.user_id] ?? null } })));
   };
 
   useEffect(() => {
@@ -71,7 +81,7 @@ function AdminPage() {
 
   const approve = async (id: string) => {
     setBusy(id);
-    const { error } = await supabase.rpc("approve_payment", { _submission_id: id, _note: notes[id] || null });
+    const { error } = await supabase.rpc("approve_payment", { _submission_id: id, _note: notes[id] || undefined });
     setBusy(null);
     if (error) toast.error(error.message);
     else {
@@ -82,7 +92,7 @@ function AdminPage() {
 
   const reject = async (id: string) => {
     setBusy(id);
-    const { error } = await supabase.rpc("reject_payment", { _submission_id: id, _note: notes[id] || null });
+    const { error } = await supabase.rpc("reject_payment", { _submission_id: id, _note: notes[id] || undefined });
     setBusy(null);
     if (error) toast.error(error.message);
     else {

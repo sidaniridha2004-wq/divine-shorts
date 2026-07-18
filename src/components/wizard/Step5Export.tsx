@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { exportVideo, type ExportProgress } from "@/lib/export/webcodecs-export";
+import { useSession } from "@/lib/pro-status";
 import { saveProject } from "@/lib/projects-store";
 import { buildCaption } from "@/lib/caption";
 import { getMp3QuranReciters } from "@/lib/quran-api";
@@ -282,15 +283,23 @@ function AspectBtn({ value }: { value: "9:16" | "1:1" | "16:9" | "4:5" }) {
 }
 function ResBtn({ value }: { value: 720 | 1080 }) {
   const { settings, update } = useProjectState();
+  const { isPro } = useSession();
+  const locked = value === 1080 && !isPro;
   return (
     <button
       type="button"
-      onClick={() => update({ resolution: value })}
-      className={`rounded-md border px-3 py-2 text-sm ${
+      onClick={() => {
+        if (locked) {
+          toast.error("1080p HD is a Pro feature");
+          return;
+        }
+        update({ resolution: value });
+      }}
+      className={`relative rounded-md border px-3 py-2 text-sm ${
         settings.resolution === value ? "border-accent bg-accent/20" : "border-border bg-card"
-      }`}
+      } ${locked ? "opacity-60" : ""}`}
     >
-      {value}p
+      {value}p{locked ? " 🔒" : ""}
     </button>
   );
 }

@@ -514,12 +514,21 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           
           t = cTime - first.absoluteStart;
 
-          // Stop if reached the end of the last segment
+          const reciterGain = getReciterGain();
           if (cTime >= last.absoluteEnd) {
+             const overage = (cTime - last.absoluteEnd);
+             reciterGain.gain.value = Math.max(0, 1.0 - (overage / 0.8));
+          } else {
+             reciterGain.gain.value = 1;
+          }
+
+          // Stop if reached the end of the total video duration (including padding)
+          if (t >= duration) {
             reciterAudioRef.current.pause();
             ambientRef.current?.pause();
             setPlaying(false);
             t = duration;
+            reciterGain.gain.value = 1;
           }
 
           // Find current segment index based on absolute time

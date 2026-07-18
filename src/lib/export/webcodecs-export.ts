@@ -165,12 +165,11 @@ export async function exportVideo(
     const now = audioCtx.currentTime;
     reciterGain.gain.cancelScheduledValues(now);
     reciterGain.gain.setValueAtTime(1, now);
-    if (reciterPhysicalDuration > 0.5) {
-      reciterGain.gain.setValueAtTime(1, now + reciterPhysicalDuration - 0.5);
-      reciterGain.gain.linearRampToValueAtTime(0, now + reciterPhysicalDuration);
-    } else {
-      reciterGain.gain.setValueAtTime(0, now + reciterPhysicalDuration);
-    }
+    
+    // Fade out over 0.8s starting *after* the verse ends, into the padding.
+    // This prevents cutting off echoes or breaths at the end of the word.
+    reciterGain.gain.setValueAtTime(1, now + reciterPhysicalDuration);
+    reciterGain.gain.linearRampToValueAtTime(0, now + reciterPhysicalDuration + (0.8 / audioSpeed));
   }
 
   reciterEl.currentTime = segments[0].absoluteStart;

@@ -226,7 +226,7 @@ export type Mp3QuranReciter = {
 };
 
 // Known popular reciter IDs on mp3quran to boost to the top
-const POPULAR_MP3QURAN_IDS = [
+export const POPULAR_MP3QURAN_IDS = [
   123, // Mishary Alafasy
   54,  // Abdur-Rahman As-Sudais
   118, // Mahmoud Khalil Al-Husary

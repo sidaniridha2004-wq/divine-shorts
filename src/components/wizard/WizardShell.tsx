@@ -10,7 +10,7 @@ import { Check, ChevronLeft, ChevronRight, Play, Pause, Sparkles } from "lucide-
 import { useProjectState } from "@/lib/project-state";
 import { RECITERS } from "@/lib/reciters";
 import { THEMES } from "@/lib/themes";
-import { getChapters } from "@/lib/quran-api";
+import { getChapters, POPULAR_MP3QURAN_IDS } from "@/lib/quran-api";
 
 const STEPS = [
   { id: 1, title: "Verse", desc: "Pick a surah and ayahs" },
@@ -43,7 +43,7 @@ export function WizardShell() {
   const surpriseMe = async () => {
     setIsSurprising(true);
     try {
-      const randReciter = RECITERS[Math.floor(Math.random() * RECITERS.length)];
+      const randReciterId = POPULAR_MP3QURAN_IDS[Math.floor(Math.random() * POPULAR_MP3QURAN_IDS.length)];
       const randTheme = THEMES[Math.floor(Math.random() * THEMES.length)];
       
       const chapters = await getChapters();
@@ -64,7 +64,7 @@ export function WizardShell() {
         chapterName: randChapter.name_simple,
         fromAyah: randFrom,
         toAyah: randTo,
-        reciterId: randReciter.id,
+        reciterId: randReciterId,
         themeId: randTheme.id,
       });
     } catch (e) {

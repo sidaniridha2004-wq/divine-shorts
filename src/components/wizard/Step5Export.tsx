@@ -283,23 +283,15 @@ function AspectBtn({ value }: { value: "9:16" | "1:1" | "16:9" | "4:5" }) {
 }
 function ResBtn({ value }: { value: 720 | 1080 }) {
   const { settings, update } = useProjectState();
-  const { isPro } = useSession();
-  const locked = value === 1080 && !isPro;
   return (
     <button
       type="button"
-      onClick={() => {
-        if (locked) {
-          toast.error("1080p HD is a Pro feature");
-          return;
-        }
-        update({ resolution: value });
-      }}
+      onClick={() => update({ resolution: value })}
       className={`relative rounded-md border px-3 py-2 text-sm ${
         settings.resolution === value ? "border-accent bg-accent/20" : "border-border bg-card"
-      } ${locked ? "opacity-60" : ""}`}
+      }`}
     >
-      {value}p{locked ? " 🔒" : ""}
+      {value}p
     </button>
   );
 }

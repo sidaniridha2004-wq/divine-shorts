@@ -478,11 +478,20 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           const m = w * 0.03;
           ctx.strokeRect(m, m, w - m * 2, h - m * 2);
         }
-        // Free users always get a "QuranReels" watermark; Pro users can customize or hide it.
+        // Free users must show a watermark, but can still customize text/position.
+        // Pro users can hide it entirely or use a logo.
         const pro = isProNow();
+        const userWm = settings.watermark;
         const wm = pro
-          ? settings.watermark
-          : { type: "text" as const, text: "QuranReels", position: "br" as const };
+          ? userWm
+          : {
+              type: "text" as const,
+              text:
+                userWm.type === "text" && userWm.text.trim()
+                  ? userWm.text
+                  : "QuranReels",
+              position: userWm.position,
+            };
         if (wm.type !== "none") {
           const label = wm.type === "logo" ? "QuranReels" : wm.text || "";
           if (label) {

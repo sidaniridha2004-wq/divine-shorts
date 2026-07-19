@@ -63,6 +63,7 @@ export type Database = {
           id: string
           is_pro: boolean
           pro_since: string | null
+          stripe_customer_id: string | null
           updated_at: string
         }
         Insert: {
@@ -71,6 +72,7 @@ export type Database = {
           id: string
           is_pro?: boolean
           pro_since?: string | null
+          stripe_customer_id?: string | null
           updated_at?: string
         }
         Update: {
@@ -79,6 +81,7 @@ export type Database = {
           id?: string
           is_pro?: boolean
           pro_since?: string | null
+          stripe_customer_id?: string | null
           updated_at?: string
         }
         Relationships: []

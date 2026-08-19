@@ -10,10 +10,10 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Crown, LogOut, Shield, User } from "lucide-react";
+import { LogOut, Shield, User } from "lucide-react";
 
 export function UserMenu() {
-  const { userId, email, isPro, isAdmin, loading } = useSession();
+  const { userId, email, isAdmin, loading } = useSession();
   const navigate = useNavigate();
 
   if (loading) return <div className="h-9 w-20 animate-pulse rounded-md bg-muted" />;
@@ -35,26 +35,13 @@ export function UserMenu() {
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="outline" size="sm" className="gap-2">
-          {isPro ? (
-            <span className="inline-flex items-center gap-1 text-gold">
-              <Crown className="h-3.5 w-3.5" /> Pro
-            </span>
-          ) : (
-            <User className="h-3.5 w-3.5" />
-          )}
+          <User className="h-3.5 w-3.5" />
           <span className="hidden max-w-[120px] truncate sm:inline">{email}</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
         <DropdownMenuLabel className="truncate">{email}</DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {!isPro && (
-          <DropdownMenuItem asChild>
-            <Link to="/pro" className="cursor-pointer">
-              <Crown className="mr-2 h-4 w-4 text-gold" /> Upgrade to Pro
-            </Link>
-          </DropdownMenuItem>
-        )}
         {isAdmin && (
           <DropdownMenuItem asChild>
             <Link to="/admin" className="cursor-pointer">

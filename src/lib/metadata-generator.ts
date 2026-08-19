@@ -15,6 +15,10 @@ export const PLATFORMS: { code: PlatformCode; label: string }[] = [
   { code: "instagram", label: "Instagram" },
 ];
 
+// Metadata generation is fully deterministic and runs offline. There is no AI
+// service, no API key and no network call involved, so it is instant, free,
+// private, and cannot fail or rate-limit mid-export.
+
 export function generateMetadata(
   language: LanguageCode,
   platform: PlatformCode,
@@ -88,66 +92,5 @@ export function generateMetadata(
       description: `${description}\n\n${baseHashtags}`,
       tags: tags,
     };
-  }
-}
-
-export async function generateAIMetadata(
-  language: LanguageCode,
-  platform: PlatformCode,
-  chapterName: string,
-  reciterName: string,
-  fromAyah: number,
-  toAyah: number
-): Promise<{ title: string; description: string; tags: string }> {
-  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("VITE_GEMINI_API_KEY is missing in .env");
-  }
-
-  const langLabel = LANGUAGES.find(l => l.code === language)?.label || language;
-  const ayahs = fromAyah === toAyah ? fromAyah : `${fromAyah}-${toAyah}`;
-
-  const prompt = `You are an expert social media manager for Islamic content.
-I am creating a short-form video for ${platform}.
-Reciter: ${reciterName}
-Surah: ${chapterName}
-Ayahs: ${ayahs}
-Language requested: ${langLabel}
-
-Please generate:
-1. A highly engaging and viral Title (max 60 characters).
-2. A beautiful Description that includes the reciter, surah, ayahs, and a short message.
-3. Relevant hashtags (comma separated string).
-
-Output ONLY strict JSON format like this, and DO NOT wrap it in markdown code blocks:
-{
-  "title": "Title here",
-  "description": "Description here",
-  "tags": "#tag1, #tag2"
-}`;
-
-  try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          response_mime_type: "application/json",
-          temperature: 0.7,
-        }
-      })
-    });
-    
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
-    
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) throw new Error("No output from AI");
-    
-    return JSON.parse(text);
-  } catch (err: any) {
-    console.error("AI Generation Error:", err);
-    throw new Error(err.message || "Failed to generate metadata");
   }
 }

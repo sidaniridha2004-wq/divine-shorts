@@ -79,6 +79,63 @@ function setSpeakerMuted(muted: boolean) {
   if (_speakerGain) _speakerGain.gain.value = muted ? 0 : 1;
 }
 
+// ── Background video seeking ────────────────────────────────────────────
+// Seeking a paused <video> is by far the most expensive operation in the
+// export pipeline, so this helper exists to keep it as cheap as possible.
+//
+// The original implementation registered requestVideoFrameCallback *inside*
+// the "seeked" listener. rVFC only fires when a video presents a NEW frame,
+// which a paused element that has just finished seeking never does -- so the
+// callback almost never ran and virtually every frame fell through to the
+// 1500ms safety timeout instead. Compounding that, the skip threshold was
+// 0.05s while one frame at 30fps is only 0.0333s, so the seek fired on
+// roughly every other frame and the background silently ran at ~15fps.
+// A 48s reel therefore spent ~720 seeks x 1.5s ~= 18 minutes waiting.
+//
+// "seeked" already guarantees the frame is decoded and drawable, so resolve
+// on it directly and keep only a short safety net.
+const SEEK_EPSILON = 0.015;
+const SEEK_TIMEOUT_MS = 250;
+
+function seekVideoFrame(v: HTMLVideoElement, time: number): Promise<void> {
+  // A non-finite duration (still loading, or a stream) used to produce a NaN
+  // currentTime assignment, after which "seeked" never fires at all.
+  if (!Number.isFinite(time) || v.readyState < 2) return Promise.resolve();
+  if (Math.abs(v.currentTime - time) < SEEK_EPSILON) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      v.removeEventListener("seeked", done);
+      resolve();
+    };
+    v.addEventListener("seeked", done, { once: true });
+    timer = setTimeout(done, SEEK_TIMEOUT_MS);
+    try {
+      v.currentTime = time;
+    } catch {
+      done();
+    }
+  });
+}
+
+function loopedTime(v: HTMLVideoElement, t: number): number {
+  const d = v.duration;
+  return Number.isFinite(d) && d > 0 ? t % d : 0;
+}
+
+// ── Typography layout memoisation ───────────────────────────────────────
+// The shrink-to-fit loop below calls wrapText(), which runs measureText()
+// once per word, and it repeats that up to ~10 times looking for a size that
+// fits. That ran on EVERY frame even though the result cannot change while a
+// verse is on screen. At 1440 frames per 48s export that was one of the
+// largest remaining CPU costs, and it slowed the live preview too.
+const _arLayoutCache = new Map<string, { arSize: number; arLines: string[]; arLineH: number }>();
+const _trLayoutCache = new Map<string, string[]>();
+
 // ── Duration probing (fallback) ─────────────────────────────────────────
 function probeDuration(url: string): Promise<number | null> {
   return new Promise((resolve) => {
@@ -248,6 +305,9 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         v.muted = true;
         v.loop = true;
         v.playsInline = true;
+        // "auto" keeps the whole clip buffered, which is what makes the
+        // per-frame export seeks cheap instead of network-bound.
+        v.preload = "auto";
         v.onloadeddata = () => {
           bgMediaRef.current[key] = v;
           v.play().catch(() => {});
@@ -340,14 +400,16 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         ctx.fillStyle = "#000000";
         ctx.fillRect(0, 0, w, h);
 
+        // Hoisted out of drawMedia: this used to run a linear THEMES.find() on
+        // every drawMedia call, which is up to 4x per frame.
+        const activeTheme = THEMES.find((th) => th.id === settings.themeId);
+        const wantsVideo = !!settings.customBg || !!activeTheme?.video || settings.bgMode === "per-ayah";
+
         const drawMedia = (v: HTMLVideoElement | HTMLImageElement | null, alpha: number, box: {x:number,y:number,w:number,h:number}, blurVal: number, applyTransform: boolean) => {
           const vw = ((v as any)?.videoWidth ?? (v as HTMLImageElement)?.naturalWidth ?? 0) as number;
           const vh = ((v as any)?.videoHeight ?? (v as HTMLImageElement)?.naturalHeight ?? 0) as number;
           const isVideo = v && 'readyState' in v;
           const videoReady = !!v && vw > 0 && vh > 0 && (!isVideo || (v as HTMLVideoElement).readyState >= 2);
-          
-          const theme = THEMES.find((th) => th.id === settings.themeId);
-          const wantsVideo = !!settings.customBg || !!theme?.video || settings.bgMode === "per-ayah";
           
           ctx.globalAlpha = alpha;
           if (wantsVideo && videoReady) {
@@ -381,10 +443,10 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
                 ctx.fillRect(box.x, box.y, box.w, box.h);
               }
             }
-          } else if (theme?.generated && !settings.customBg) {
+          } else if (activeTheme?.generated && !settings.customBg) {
             ctx.save();
             ctx.translate(box.x, box.y);
-            drawGeneratedBg(ctx, theme.generated, box.w, box.h, t);
+            drawGeneratedBg(ctx, activeTheme.generated, box.w, box.h, t);
             ctx.restore();
           } else {
             if (alpha === 1) {
@@ -659,25 +721,8 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           if (activeBg instanceof HTMLVideoElement) {
             const v = activeBg;
             if (isExporting) {
-              if (v.readyState > 0) {
-                v.pause(); // Crucial to prevent decoder artifacts
-                const targetTime = clamped % v.duration;
-                if (Math.abs(v.currentTime - targetTime) > 0.05) {
-                  v.currentTime = targetTime;
-                  await new Promise<void>(r => {
-                    let fired = false;
-                    const done = () => { if (!fired) { fired = true; r(); } };
-                    v.addEventListener("seeked", () => {
-                      if ('requestVideoFrameCallback' in v) {
-                        (v as any).requestVideoFrameCallback(done);
-                      } else {
-                        done();
-                      }
-                    }, { once: true });
-                    setTimeout(done, 1500);
-                  });
-                }
-              }
+              v.pause(); // Crucial to prevent decoder artifacts
+              await seekVideoFrame(v, loopedTime(v, clamped));
             } else if (v.paused) {
               v.play().catch(() => {});
             }
@@ -696,22 +741,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           let activeBg = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
 
           if (activeBg instanceof HTMLVideoElement) {
-            const v = activeBg;
-            if (v.readyState > 0) {
-              v.currentTime = clamped % v.duration;
-              await new Promise<void>(r => {
-                let fired = false;
-                const done = () => { if (!fired) { fired = true; r(); } };
-                v.addEventListener("seeked", () => {
-                  if ('requestVideoFrameCallback' in v) {
-                    (v as any).requestVideoFrameCallback(done);
-                  } else {
-                    done();
-                  }
-                }, { once: true });
-                setTimeout(done, 1500);
-              });
-            }
+            await seekVideoFrame(activeBg, loopedTime(activeBg, clamped));
           }
           draw(clamped, idx);
           
@@ -910,19 +940,32 @@ function drawText(
     ctx.shadowBlur = 12 * sizeScale;
     ctx.shadowOffsetY = 2;
   }
-  let arSize = s.arabicSize * sizeScale;
-  const minSize = s.arabicSize * sizeScale * 0.35;
-  let arLines: string[] = [];
-  let arLineH = 0;
-  for (;;) {
-    ctx.font = `700 ${arSize}px ${arabicFont}`;
-    arLines = wrapText(ctx, arabic, maxW);
-    arLineH = arSize * s.lineHeight;
-    const lineOK = arLines.length <= 4 || arSize <= minSize;
-    const heightOK = arLines.length * arLineH <= h * 0.55 || arSize <= 14;
-    if (lineOK && heightOK) break;
-    arSize *= 0.92;
+
+  // The shrink-to-fit search below is pure text measurement, and its result
+  // is identical for every frame a given verse is on screen. Memoise it.
+  const arKey = `${arabic}|${maxW.toFixed(2)}|${s.arabicSize}|${sizeScale.toFixed(5)}|${s.lineHeight}|${arabicFont}|${h}`;
+  let arLayout = _arLayoutCache.get(arKey);
+  if (!arLayout) {
+    let searchSize = s.arabicSize * sizeScale;
+    const minSize = s.arabicSize * sizeScale * 0.35;
+    let lines: string[] = [];
+    let lineH = 0;
+    for (;;) {
+      ctx.font = `700 ${searchSize}px ${arabicFont}`;
+      lines = wrapText(ctx, arabic, maxW);
+      lineH = searchSize * s.lineHeight;
+      const lineOK = lines.length <= 4 || searchSize <= minSize;
+      const heightOK = lines.length * lineH <= h * 0.55 || searchSize <= 14;
+      if (lineOK && heightOK) break;
+      searchSize *= 0.92;
+    }
+    arLayout = { arSize: searchSize, arLines: lines, arLineH: lineH };
+    if (_arLayoutCache.size > 96) _arLayoutCache.clear();
+    _arLayoutCache.set(arKey, arLayout);
   }
+  const { arSize, arLines, arLineH } = arLayout;
+  ctx.font = `700 ${arSize}px ${arabicFont}`;
+
   const arTotalH = arLines.length * arLineH;
   let y = baseY - arTotalH / 2;
   arLines.forEach((line) => {
@@ -936,7 +979,13 @@ function drawText(
     ctx.font = `500 ${trSize}px Inter, sans-serif`;
     ctx.fillStyle = s.textColor;
     const trY = s.layout === "split" ? h * 0.7 : y + arLineH * 0.4;
-    const trLines = wrapText(ctx, translation, maxW);
+    const trKey = `${translation}|${maxW.toFixed(2)}|${trSize.toFixed(3)}`;
+    let trLines = _trLayoutCache.get(trKey);
+    if (!trLines) {
+      trLines = wrapText(ctx, translation, maxW);
+      if (_trLayoutCache.size > 96) _trLayoutCache.clear();
+      _trLayoutCache.set(trKey, trLines);
+    }
     const trLineH = trSize * 1.4;
     let ty = trY;
     trLines.forEach((line) => {

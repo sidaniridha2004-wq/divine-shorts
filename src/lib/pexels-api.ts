@@ -1,5 +1,25 @@
 // Pexels API client for fetching video and photo backgrounds dynamically.
-const PEXELS_API_KEY = "lbV02U2COOBmyvC03Ie3kiA0xfI7V9KnJIGUQS9LGcIVqtxIxV7pKY9c";
+//
+// SECURITY: this key used to be hardcoded in source. It is now read from the
+// environment. Note that VITE_* values are inlined into the public bundle, so
+// this must be a free-tier key you can rotate at any time -- treat it as
+// public, not secret. If you need it truly private, proxy these calls through
+// a server function instead.
+//
+// When no key is configured, searches resolve to empty results rather than
+// throwing, so the editor keeps working with the bundled themes.
+
+const PEXELS_API_KEY = (
+  (import.meta.env.VITE_PEXELS_API_KEY as string | undefined) ?? ""
+).trim();
+
+const PEXELS_API_ROOT = "https://api.pexels.com";
+const VIDEO_SEARCH_PATH = "/videos/search";
+const PHOTO_SEARCH_PATH = "/v1/search";
+
+export function isPexelsConfigured(): boolean {
+  return PEXELS_API_KEY.length > 0;
+}
 
 export type PexelsVideo = {
   id: number;
@@ -42,27 +62,50 @@ export type PexelsSearchResult = {
   photos?: PexelsPhoto[];
 };
 
+type SearchOptions = {
+  orientation?: "portrait" | "landscape" | "square";
+  page?: number;
+  perPage?: number;
+};
+
+function emptyResult(page: number, perPage: number): PexelsSearchResult {
+  return { total_results: 0, page, per_page: perPage, videos: [], photos: [] };
+}
+
+async function pexelsSearch(
+  path: string,
+  query: string,
+  opts: SearchOptions,
+): Promise<PexelsSearchResult> {
+  const page = opts.page ?? 1;
+  const perPage = opts.perPage ?? 12;
+  if (!isPexelsConfigured()) return emptyResult(page, perPage);
+
+  const params = new URLSearchParams({
+    query,
+    orientation: opts.orientation ?? "portrait",
+    page: String(page),
+    per_page: String(perPage),
+  });
+
+  const endpoint = PEXELS_API_ROOT + path + "?" + params.toString();
+  const res = await fetch(endpoint, {
+    headers: { Authorization: PEXELS_API_KEY },
+  });
+
+  if (!res.ok) throw new Error("Pexels API error: " + res.status);
+  return (await res.json()) as PexelsSearchResult;
+}
+
 /**
  * Search for videos on Pexels. Returns portrait-oriented videos by default
  * which are ideal for 9:16 Quran reels.
  */
 export async function searchPexelsVideos(
   query: string,
-  opts: { orientation?: "portrait" | "landscape" | "square"; page?: number; perPage?: number } = {},
+  opts: SearchOptions = {},
 ): Promise<PexelsSearchResult> {
-  const params = new URLSearchParams({
-    query,
-    orientation: opts.orientation ?? "portrait",
-    page: String(opts.page ?? 1),
-    per_page: String(opts.perPage ?? 12),
-  });
-
-  const res = await fetch(`https://api.pexels.com/videos/search?${params}`, {
-    headers: { Authorization: PEXELS_API_KEY },
-  });
-
-  if (!res.ok) throw new Error(`Pexels API ${res.status}`);
-  return res.json();
+  return pexelsSearch(VIDEO_SEARCH_PATH, query, opts);
 }
 
 /**
@@ -70,21 +113,9 @@ export async function searchPexelsVideos(
  */
 export async function searchPexelsPhotos(
   query: string,
-  opts: { orientation?: "portrait" | "landscape" | "square"; page?: number; perPage?: number } = {},
+  opts: SearchOptions = {},
 ): Promise<PexelsSearchResult> {
-  const params = new URLSearchParams({
-    query,
-    orientation: opts.orientation ?? "portrait",
-    page: String(opts.page ?? 1),
-    per_page: String(opts.perPage ?? 12),
-  });
-
-  const res = await fetch(`https://api.pexels.com/v1/search?${params}`, {
-    headers: { Authorization: PEXELS_API_KEY },
-  });
-
-  if (!res.ok) throw new Error(`Pexels API ${res.status}`);
-  return res.json();
+  return pexelsSearch(PHOTO_SEARCH_PATH, query, opts);
 }
 
 /**

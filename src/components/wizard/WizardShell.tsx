@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PreviewCanvas, type PreviewHandle } from "./PreviewCanvas";
 import { Step1Verse } from "./Step1Verse";
 import { Step2Reciter } from "./Step2Reciter";
@@ -6,6 +6,7 @@ import { Step3Text } from "./Step3Text";
 import { Step4Style } from "./Step4Style";
 import { Step5Export } from "./Step5Export";
 import { Button } from "@/components/ui/button";
+import { Slider } from "@/components/ui/slider";
 import { Check, ChevronLeft, ChevronRight, Play, Pause, Sparkles } from "lucide-react";
 import { useProjectState } from "@/lib/project-state";
 import { RECITERS } from "@/lib/reciters";
@@ -25,8 +26,30 @@ export function WizardShell() {
   const [step, setStep] = useState(1);
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState(0);
+  const [duration, setDuration] = useState(0);
   const previewRef = useRef<PreviewHandle>(null);
   const { update, settings } = useProjectState();
+
+  // While the user drags the scrub bar, ignore progress callbacks so the thumb
+  // does not fight the playhead. This is a ref rather than state on purpose:
+  // PreviewCanvas lists onProgress in its render-loop dependencies, so handing
+  // it a new function identity on every render would tear down and restart the
+  // loop.
+  const scrubbingRef = useRef(false);
+
+  const handleProgress = useCallback((t: number) => {
+    if (!scrubbingRef.current) setTime(t);
+  }, []);
+
+  // Total duration is only known once verses and ayah timings have loaded.
+  // Polling the handle keeps this out of PreviewCanvas entirely.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const d = previewRef.current?.getDuration() ?? 0;
+      setDuration((prev) => (Math.abs(prev - d) > 0.05 ? d : prev));
+    }, 500);
+    return () => window.clearInterval(id);
+  }, []);
 
   const togglePlay = async () => {
     if (!previewRef.current) return;
@@ -37,6 +60,20 @@ export function WizardShell() {
       await previewRef.current.play();
       setPlaying(true);
     }
+  };
+
+  const handleScrub = (v: number[]) => {
+    const t = v[0] ?? 0;
+    scrubbingRef.current = true;
+    setTime(t);
+    previewRef.current?.seek(t);
+    // Paused seeks do not necessarily repaint on their own, so force a single
+    // frame to make scrubbing visible.
+    if (!playing) void previewRef.current?.drawFrame(t);
+  };
+
+  const endScrub = () => {
+    scrubbingRef.current = false;
   };
 
   const [isSurprising, setIsSurprising] = useState(false);
@@ -137,17 +174,29 @@ export function WizardShell() {
         {/* Preview (top on mobile, right column on desktop) */}
         <section className="order-1 lg:order-3">
           <div className="sticky top-20 rounded-2xl border border-border bg-card p-3">
-            <PreviewCanvas ref={previewRef} onProgress={setTime} />
-            <div className="mt-3 flex items-center gap-2">
-              <Button size="sm" variant="secondary" onClick={togglePlay}>
-                {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-              </Button>
-              <div className="min-w-0 flex-1 text-xs text-muted-foreground">
-                {settings.chapterName} — {settings.chapterId}:{settings.fromAyah}
-                {settings.toAyah !== settings.fromAyah ? `-${settings.toAyah}` : ""}
-              </div>
-              <div className="text-xs tabular-nums text-muted-foreground">
-                {time.toFixed(1)}s
+            <PreviewCanvas ref={previewRef} onProgress={handleProgress} />
+            <div className="mt-3 space-y-2">
+              <Slider
+                value={[duration > 0 ? Math.min(time, duration) : 0]}
+                min={0}
+                max={duration > 0 ? duration : 1}
+                step={0.05}
+                disabled={duration <= 0}
+                onValueChange={handleScrub}
+                onValueCommit={endScrub}
+                aria-label="Scrub preview"
+              />
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="secondary" onClick={togglePlay}>
+                  {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                </Button>
+                <div className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                  {settings.chapterName} — {settings.chapterId}:{settings.fromAyah}
+                  {settings.toAyah !== settings.fromAyah ? `-${settings.toAyah}` : ""}
+                </div>
+                <div className="text-xs tabular-nums text-muted-foreground">
+                  {time.toFixed(1)}s{duration > 0 ? ` / ${duration.toFixed(1)}s` : ""}
+                </div>
               </div>
             </div>
           </div>

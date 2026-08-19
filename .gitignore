@@ -16,6 +16,21 @@ dist-ssr
 .nitro
 *.local
 
+# Environment / credentials
+#
+# NEVER commit real credentials. Note that anything prefixed with VITE_ is
+# inlined into the public JavaScript bundle at build time, so it is not secret
+# either -- keep genuine server secrets (payment keys, AI keys, service-role
+# keys) in your hosting provider's environment variable settings only.
+#
+# .env is intentionally still tracked because it holds public Supabase config
+# that the build needs. Anything private belongs in the files below.
+.env.local
+.env.*.local
+.env.development.local
+.env.production.local
+*.env.secret
+
 # Wrangler / Cloudflare
 .wrangler/
 .dev.vars

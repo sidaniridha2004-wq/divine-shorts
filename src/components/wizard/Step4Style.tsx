@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { Shuffle, Search, Loader2 } from "lucide-react";
+import { Shuffle, Search, Loader2, Play, Pause } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
@@ -31,6 +31,23 @@ function generatedStyle(g: GeneratedTheme): CSSProperties {
         background: `repeating-linear-gradient(45deg, ${g.fg}22 0 1px, transparent 1px 24px), repeating-linear-gradient(-45deg, ${g.fg}22 0 1px, transparent 1px 24px), ${g.bg}`,
       };
   }
+}
+
+// Tap target that toggles an inline clip preview without selecting the tile.
+// Hover previews only work with a mouse -- onMouseEnter never fires on a phone --
+// so every video tile also gets this badge. It is a sibling of the tile button
+// rather than a child because nesting a button inside a button is invalid HTML.
+function PreviewBadge({ active, onToggle }: { active: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-label={active ? "Stop preview" : "Preview clip"}
+      className="absolute right-2 top-2 z-10 grid h-8 w-8 place-items-center rounded-full bg-black/60 text-white backdrop-blur transition hover:bg-black/80"
+    >
+      {active ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+    </button>
+  );
 }
 
 // Suggested search queries for Islamic / cinematic backgrounds
@@ -61,6 +78,10 @@ export function Step4Style() {
   const [pexelsHoverId, setPexelsHoverId] = useState<number | null>(null);
   const [selectedPexelsId, setSelectedPexelsId] = useState<number | null>(null);
   const [selectedAyah, setSelectedAyah] = useState<number | null>(null);
+  // Tap-to-preview: only one clip plays at a time, on stock results and on the
+  // built-in theme grid.
+  const [previewId, setPreviewId] = useState<number | null>(null);
+  const [themePreviewId, setThemePreviewId] = useState<string | null>(null);
 
   // Initialize selectedAyah if per-ayah mode is active
   useEffect(() => {
@@ -103,6 +124,7 @@ export function Step4Style() {
   const searchMedia = useCallback(async (query: string, type: "video" | "photo", provider: "pexels" | "pixabay", matchDur: boolean) => {
     if (!query.trim()) return;
     setPexelsLoading(true);
+    setPreviewId(null);
     try {
       let minDuration = 0;
       if (matchDur && type === "video" && settings.chapterId && settings.reciterId && settings.fromAyah && settings.toAyah) {
@@ -364,6 +386,11 @@ export function Step4Style() {
             </button>
           ))}
         </div>
+        {pexelsType === "video" && (pexelsVideoResults.length > 0 || pixabayVideoResults.length > 0) && (
+          <p className="mb-3 text-[10px] text-muted-foreground">
+            Tap the play badge to preview a clip. Tap the tile to use it as your background.
+          </p>
+        )}
         {pexelsLoading && (
           <div className="flex items-center justify-center py-8">
             <Loader2 className="h-6 w-6 animate-spin text-accent" />
@@ -375,42 +402,51 @@ export function Step4Style() {
             {pexelsVideoResults.map((video) => {
               const active = selectedPexelsId === video.id;
               const hovering = pexelsHoverId === video.id;
+              const previewing = previewId === video.id;
+              const showVideo = hovering || previewing;
               const videoUrl = getBestVideoUrl(video);
               return (
-                <button
-                  key={video.id}
-                  type="button"
-                  onClick={() => selectPexelsVideo(video)}
-                  onMouseEnter={() => setPexelsHoverId(video.id)}
-                  onMouseLeave={() => setPexelsHoverId((h) => (h === video.id ? null : h))}
-                  className={`group relative aspect-[9/16] overflow-hidden rounded-xl border transition ${
-                    active
-                      ? "border-accent shadow-gold"
-                      : "border-border hover:border-accent/50"
-                  }`}
-                >
-                  {!hovering && (
-                    <img
-                      src={video.image}
-                      alt={`Video by ${video.user.name}`}
-                      className="absolute inset-0 h-full w-full object-cover"
-                      loading="lazy"
+                <div key={video.id} className="relative">
+                  <button
+                    type="button"
+                    onClick={() => selectPexelsVideo(video)}
+                    onMouseEnter={() => setPexelsHoverId(video.id)}
+                    onMouseLeave={() => setPexelsHoverId((h) => (h === video.id ? null : h))}
+                    className={`group relative block aspect-[9/16] w-full overflow-hidden rounded-xl border transition ${
+                      active
+                        ? "border-accent shadow-gold"
+                        : "border-border hover:border-accent/50"
+                    }`}
+                  >
+                    {!showVideo && (
+                      <img
+                        src={video.image}
+                        alt={`Video by ${video.user.name}`}
+                        className="absolute inset-0 h-full w-full object-cover"
+                        loading="lazy"
+                      />
+                    )}
+                    {showVideo && videoUrl && (
+                      <video
+                        src={videoUrl}
+                        autoPlay
+                        muted
+                        loop
+                        playsInline
+                        className="absolute inset-0 h-full w-full object-cover"
+                      />
+                    )}
+                    <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-2 text-left text-[10px] font-medium text-white">
+                      📷 {video.user.name}
+                    </div>
+                  </button>
+                  {videoUrl && (
+                    <PreviewBadge
+                      active={previewing}
+                      onToggle={() => setPreviewId((p) => (p === video.id ? null : video.id))}
                     />
                   )}
-                  {hovering && videoUrl && (
-                    <video
-                      src={videoUrl}
-                      autoPlay
-                      muted
-                      loop
-                      playsInline
-                      className="absolute inset-0 h-full w-full object-cover"
-                    />
-                  )}
-                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-2 text-left text-[10px] font-medium text-white">
-                    📷 {video.user.name}
-                  </div>
-                </button>
+                </div>
               );
             })}
           </div>
@@ -421,42 +457,51 @@ export function Step4Style() {
             {pixabayVideoResults.map((video) => {
               const active = selectedPexelsId === video.id;
               const hovering = pexelsHoverId === video.id;
+              const previewing = previewId === video.id;
+              const showVideo = hovering || previewing;
               const videoUrl = getBestPixabayVideoUrl(video);
               return (
-                <button
-                  key={video.id}
-                  type="button"
-                  onClick={() => selectPixabayVideo(video)}
-                  onMouseEnter={() => setPexelsHoverId(video.id)}
-                  onMouseLeave={() => setPexelsHoverId((h) => (h === video.id ? null : h))}
-                  className={`group relative aspect-[9/16] overflow-hidden rounded-xl border transition ${
-                    active
-                      ? "border-accent shadow-gold"
-                      : "border-border hover:border-accent/50"
-                  }`}
-                >
-                  {!hovering && (
-                    <img
-                      src={video.videos?.tiny?.thumbnail || video.videos?.small?.thumbnail || `https://i.vimeocdn.com/video/${video.picture_id}_295x166.jpg`}
-                      alt={`Video by ${video.user}`}
-                      className="absolute inset-0 h-full w-full object-cover"
-                      loading="lazy"
+                <div key={video.id} className="relative">
+                  <button
+                    type="button"
+                    onClick={() => selectPixabayVideo(video)}
+                    onMouseEnter={() => setPexelsHoverId(video.id)}
+                    onMouseLeave={() => setPexelsHoverId((h) => (h === video.id ? null : h))}
+                    className={`group relative block aspect-[9/16] w-full overflow-hidden rounded-xl border transition ${
+                      active
+                        ? "border-accent shadow-gold"
+                        : "border-border hover:border-accent/50"
+                    }`}
+                  >
+                    {!showVideo && (
+                      <img
+                        src={video.videos?.tiny?.thumbnail || video.videos?.small?.thumbnail || `https://i.vimeocdn.com/video/${video.picture_id}_295x166.jpg`}
+                        alt={`Video by ${video.user}`}
+                        className="absolute inset-0 h-full w-full object-cover"
+                        loading="lazy"
+                      />
+                    )}
+                    {showVideo && videoUrl && (
+                      <video
+                        src={videoUrl}
+                        autoPlay
+                        muted
+                        loop
+                        playsInline
+                        className="absolute inset-0 h-full w-full object-cover"
+                      />
+                    )}
+                    <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-2 text-left text-[10px] font-medium text-white">
+                      📷 {video.user}
+                    </div>
+                  </button>
+                  {videoUrl && (
+                    <PreviewBadge
+                      active={previewing}
+                      onToggle={() => setPreviewId((p) => (p === video.id ? null : video.id))}
                     />
                   )}
-                  {hovering && videoUrl && (
-                    <video
-                      src={videoUrl}
-                      autoPlay
-                      muted
-                      loop
-                      playsInline
-                      className="absolute inset-0 h-full w-full object-cover"
-                    />
-                  )}
-                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-2 text-left text-[10px] font-medium text-white">
-                    📷 {video.user}
-                  </div>
-                </button>
+                </div>
               );
             })}
           </div>
@@ -557,44 +602,53 @@ export function Step4Style() {
           {shown.map((t) => {
             const active = settings.themeId === t.id && !settings.customBg;
             const hovering = hoverId === t.id;
+            const previewing = themePreviewId === t.id;
+            const showVideo = !!t.video && (hovering || previewing);
             return (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => { update({ themeId: t.id, customBg: null }); setSelectedPexelsId(null); }}
-                onMouseEnter={() => setHoverId(t.id)}
-                onMouseLeave={() => setHoverId((h) => (h === t.id ? null : h))}
-                className={`group relative aspect-[9/16] overflow-hidden rounded-xl border transition ${
-                  active
-                    ? "border-accent shadow-gold"
-                    : "border-border hover:border-accent/50"
-                }`}
-              >
-                {t.generated && (
-                  <div className="absolute inset-0" style={generatedStyle(t.generated)} />
-                )}
-                {t.poster && !(hovering && t.video) && (
-                  <img
-                    src={t.poster}
-                    alt={t.name}
-                    className="absolute inset-0 h-full w-full object-cover"
-                    loading="lazy"
+              <div key={t.id} className="relative">
+                <button
+                  type="button"
+                  onClick={() => { update({ themeId: t.id, customBg: null }); setSelectedPexelsId(null); }}
+                  onMouseEnter={() => setHoverId(t.id)}
+                  onMouseLeave={() => setHoverId((h) => (h === t.id ? null : h))}
+                  className={`group relative block aspect-[9/16] w-full overflow-hidden rounded-xl border transition ${
+                    active
+                      ? "border-accent shadow-gold"
+                      : "border-border hover:border-accent/50"
+                  }`}
+                >
+                  {t.generated && (
+                    <div className="absolute inset-0" style={generatedStyle(t.generated)} />
+                  )}
+                  {t.poster && !showVideo && (
+                    <img
+                      src={t.poster}
+                      alt={t.name}
+                      className="absolute inset-0 h-full w-full object-cover"
+                      loading="lazy"
+                    />
+                  )}
+                  {showVideo && (
+                    <video
+                      src={t.video}
+                      autoPlay
+                      muted
+                      loop
+                      playsInline
+                      className="absolute inset-0 h-full w-full object-cover"
+                    />
+                  )}
+                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-2 text-left text-xs font-medium text-white">
+                    {t.name}
+                  </div>
+                </button>
+                {t.video && (
+                  <PreviewBadge
+                    active={previewing}
+                    onToggle={() => setThemePreviewId((p) => (p === t.id ? null : t.id))}
                   />
                 )}
-                {t.video && hovering && (
-                  <video
-                    src={t.video}
-                    autoPlay
-                    muted
-                    loop
-                    playsInline
-                    className="absolute inset-0 h-full w-full object-cover"
-                  />
-                )}
-                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-2 text-left text-xs font-medium text-white">
-                  {t.name}
-                </div>
-              </button>
+              </div>
             );
           })}
           {shown.length === 0 && (

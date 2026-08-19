@@ -460,6 +460,9 @@ export function Step4Style() {
               const previewing = previewId === video.id;
               const showVideo = hovering || previewing;
               const videoUrl = getBestPixabayVideoUrl(video);
+              // Pixabay usually ships its own thumbnails. When it does not, show a
+              // neutral placeholder rather than guessing at a CDN URL.
+              const thumb = video.videos?.tiny?.thumbnail || video.videos?.small?.thumbnail || "";
               return (
                 <div key={video.id} className="relative">
                   <button
@@ -473,13 +476,16 @@ export function Step4Style() {
                         : "border-border hover:border-accent/50"
                     }`}
                   >
-                    {!showVideo && (
+                    {!showVideo && thumb && (
                       <img
-                        src={video.videos?.tiny?.thumbnail || video.videos?.small?.thumbnail || `https://i.vimeocdn.com/video/${video.picture_id}_295x166.jpg`}
+                        src={thumb}
                         alt={`Video by ${video.user}`}
                         className="absolute inset-0 h-full w-full object-cover"
                         loading="lazy"
                       />
+                    )}
+                    {!showVideo && !thumb && (
+                      <div className="absolute inset-0 bg-secondary" />
                     )}
                     {showVideo && videoUrl && (
                       <video

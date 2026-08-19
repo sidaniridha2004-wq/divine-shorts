@@ -1,4 +1,17 @@
 // Pixabay API client for fetching video and photo backgrounds dynamically.
+//
+// SECURITY: VITE_* values are inlined into the public bundle, so this key is
+// effectively public. Use a free-tier key you can rotate at any time, or
+// proxy these calls through a server function if you need it kept private.
+//
+// When no key is configured, searches resolve to empty results rather than
+// throwing, so the editor keeps working with the bundled themes.
+const PIXABAY_API_KEY =
+  ((import.meta.env.VITE_PIXABAY_API_KEY as string | undefined) ?? "").trim();
+
+export function isPixabayConfigured(): boolean {
+  return PIXABAY_API_KEY.length > 0;
+}
 
 export type PixabayVideo = {
   id: number;
@@ -41,13 +54,10 @@ export async function searchPixabayVideos(
   query: string,
   opts: { page?: number; perPage?: number } = {},
 ): Promise<{ videos: PixabayVideo[] }> {
-  const apiKey = import.meta.env.VITE_PIXABAY_API_KEY;
-  if (!apiKey) {
-    throw new Error("VITE_PIXABAY_API_KEY is not set in .env");
-  }
+  if (!isPixabayConfigured()) return { videos: [] };
 
   const params = new URLSearchParams({
-    key: apiKey,
+    key: PIXABAY_API_KEY,
     q: query,
     page: String(opts.page ?? 1),
     per_page: String(opts.perPage ?? 50),
@@ -59,7 +69,7 @@ export async function searchPixabayVideos(
     throw new Error(`Pixabay API error: ${res.statusText}`);
   }
 
-  const data = await res.json() as PixabaySearchResult;
+  const data = (await res.json()) as PixabaySearchResult;
   return { videos: data.hits as PixabayVideo[] };
 }
 
@@ -67,13 +77,10 @@ export async function searchPixabayPhotos(
   query: string,
   opts: { page?: number; perPage?: number; orientation?: "vertical" | "horizontal" } = {},
 ): Promise<{ photos: PixabayPhoto[] }> {
-  const apiKey = import.meta.env.VITE_PIXABAY_API_KEY;
-  if (!apiKey) {
-    throw new Error("VITE_PIXABAY_API_KEY is not set in .env");
-  }
+  if (!isPixabayConfigured()) return { photos: [] };
 
   const params = new URLSearchParams({
-    key: apiKey,
+    key: PIXABAY_API_KEY,
     q: query,
     orientation: opts.orientation ?? "vertical",
     page: String(opts.page ?? 1),
@@ -86,7 +93,7 @@ export async function searchPixabayPhotos(
     throw new Error(`Pixabay API error: ${res.statusText}`);
   }
 
-  const data = await res.json() as PixabaySearchResult;
+  const data = (await res.json()) as PixabaySearchResult;
   return { photos: data.hits as PixabayPhoto[] };
 }
 

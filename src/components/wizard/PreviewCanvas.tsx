@@ -47,7 +47,7 @@ function getDims(s: ProjectSettings) {
   return { w: Math.round(base.w * scale), h: Math.round(base.h * scale) };
 }
 
-// ── Singleton AudioContext ──────────────────────────────────────────────
+// ── Singleton AudioContext ──────────────────────────────────────────────────
 let _audioCtx: AudioContext | null = null;
 let _audioDest: MediaStreamAudioDestinationNode | null = null;
 let _masterGain: GainNode | null = null;
@@ -127,14 +127,114 @@ function loopedTime(v: HTMLVideoElement, t: number): number {
   return Number.isFinite(d) && d > 0 ? t % d : 0;
 }
 
-// ── Typography layout memoisation ───────────────────────────────────────
-// The shrink-to-fit loop below calls wrapText(), which runs measureText()
-// once per word, and it repeats that up to ~10 times looking for a size that
-// fits. That ran on EVERY frame even though the result cannot change while a
-// verse is on screen. At 1440 frames per 48s export that was one of the
-// largest remaining CPU costs, and it slowed the live preview too.
-const _arLayoutCache = new Map<string, { arSize: number; arLines: string[]; arLineH: number }>();
-const _trLayoutCache = new Map<string, string[]>();
+// ── Cheap blur ──────────────────────────────────────────────────────────
+// ctx.filter = "blur(40px)" on a 1080x1920 canvas is a separable gaussian
+// convolution over ~2 million pixels and costs tens of milliseconds PER CALL.
+// The blurred-glass frames issue two of them per frame, which across 1440
+// frames was minutes of the export on its own.
+//
+// Downscaling by roughly the blur radius and letting bilinear filtering
+// smooth the image on the way back up is visually near-identical at the large
+// radii used here, for a small fraction of the cost.
+let _blurScratch: HTMLCanvasElement | null = null;
+
+function getBlurScratch(w: number, h: number): HTMLCanvasElement {
+  if (!_blurScratch) _blurScratch = document.createElement("canvas");
+  if (_blurScratch.width !== w || _blurScratch.height !== h) {
+    _blurScratch.width = w;
+    _blurScratch.height = h;
+  }
+  return _blurScratch;
+}
+
+function drawBlurred(
+  ctx: CanvasRenderingContext2D,
+  src: CanvasImageSource,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+  radius: number,
+) {
+  const factor = Math.min(16, Math.max(2, Math.round(radius / 2)));
+  const sw = Math.max(2, Math.round(dw / factor));
+  const sh = Math.max(2, Math.round(dh / factor));
+  const scratch = getBlurScratch(sw, sh);
+  const sctx = scratch.getContext("2d");
+  if (!sctx) {
+    ctx.drawImage(src, dx, dy, dw, dh);
+    return;
+  }
+  sctx.clearRect(0, 0, sw, sh);
+  sctx.imageSmoothingEnabled = true;
+  sctx.imageSmoothingQuality = "high";
+  sctx.drawImage(src, 0, 0, sw, sh);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(scratch, 0, 0, sw, sh, dx, dy, dw, dh);
+}
+
+// ── Cached vignette ─────────────────────────────────────────────────────
+// Depends only on the clip box size, so building the radial gradient and
+// filling it on every frame was pure waste.
+let _vignette: { key: string; canvas: HTMLCanvasElement } | null = null;
+
+function getVignette(w: number, h: number): HTMLCanvasElement | null {
+  const iw = Math.max(1, Math.round(w));
+  const ih = Math.max(1, Math.round(h));
+  const key = iw + "x" + ih;
+  if (_vignette && _vignette.key === key) return _vignette.canvas;
+  const c = document.createElement("canvas");
+  c.width = iw;
+  c.height = ih;
+  const g = c.getContext("2d");
+  if (!g) return null;
+  const r1 = Math.min(iw, ih) * 0.3;
+  const r2 = Math.max(iw, ih) * 0.7;
+  const grad = g.createRadialGradient(iw / 2, ih / 2, r1, iw / 2, ih / 2, r2);
+  grad.addColorStop(0, "rgba(0,0,0,0)");
+  grad.addColorStop(1, "rgba(0,0,0,0.65)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, iw, ih);
+  _vignette = { key, canvas: c };
+  return c;
+}
+
+// ── Cached film grain ───────────────────────────────────────────────────
+// Was 400 separate fillRect calls per frame. A tileable noise texture gives
+// the same look in a single blit, and jittering the origin keeps it moving.
+const GRAIN_TILE = 256;
+let _grainTile: HTMLCanvasElement | null = null;
+
+function getGrainTile(): HTMLCanvasElement | null {
+  if (_grainTile) return _grainTile;
+  const c = document.createElement("canvas");
+  c.width = GRAIN_TILE;
+  c.height = GRAIN_TILE;
+  const g = c.getContext("2d");
+  if (!g) return null;
+  const img = g.createImageData(GRAIN_TILE, GRAIN_TILE);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    d[i] = 255;
+    d[i + 1] = 255;
+    d[i + 2] = 255;
+    // Sparse bright specks, matching the density of the old random dots.
+    d[i + 3] = Math.random() < 0.06 ? Math.random() * 26 : 0;
+  }
+  g.putImageData(img, 0, 0);
+  _grainTile = c;
+  return c;
+}
+
+// ── Cached text layer ───────────────────────────────────────────────────
+// The Arabic text, translation, ayah number and reference are identical for
+// every frame of a given verse, yet they were re-rendered from scratch each
+// time -- including drop shadows and a shrink-to-fit search that calls
+// measureText once per word. Painting once per verse into an offscreen layer
+// and blitting it with the fade alpha turns ~1440 text renders into ~7.
+const TEXT_LAYER_CACHE_MAX = 4;
+const _textLayers = new Map<string, HTMLCanvasElement>();
 
 // ── Duration probing (fallback) ─────────────────────────────────────────
 function probeDuration(url: string): Promise<number | null> {
@@ -192,6 +292,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
     const reciterAudioRef = useRef<HTMLAudioElement>(null);
     const ambientRef = useRef<HTMLAudioElement>(null);
     const rafRef = useRef<number | null>(null);
+    const lastSigRef = useRef<string>("");
     const [verses, setVerses] = useState<Verse[]>([]);
     const [segments, setSegments] = useState<Segment[]>([]);
     const [playing, setPlaying] = useState(false);
@@ -286,6 +387,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
     // Load background
     useEffect(() => {
       bgMediaRef.current = {};
+      lastSigRef.current = "";
       const theme = THEMES.find((t) => t.id === settings.themeId);
 
       const loadImage = (src: string, key: string) => {
@@ -294,6 +396,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         img.onload = () => {
           if (!bgMediaRef.current[key] || !(bgMediaRef.current[key] instanceof HTMLVideoElement)) {
             bgMediaRef.current[key] = img;
+            lastSigRef.current = "";
           }
         };
         img.src = src;
@@ -310,6 +413,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         v.preload = "auto";
         v.onloadeddata = () => {
           bgMediaRef.current[key] = v;
+          lastSigRef.current = "";
           v.play().catch(() => {});
         };
         v.onerror = () => {};
@@ -362,6 +466,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         if (canvas.width !== w || canvas.height !== h) {
           canvas.width = w;
           canvas.height = h;
+          lastSigRef.current = "";
         }
 
         const currentSeg = segments[segIdx];
@@ -390,6 +495,59 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           clipBox = { x: (w - rectW) / 2, y: (h - rectH) / 2, w: rectW, h: rectH };
         }
 
+        const activeTheme = THEMES.find((th) => th.id === settings.themeId);
+        const wantsVideo = !!settings.customBg || !!activeTheme?.video || settings.bgMode === "per-ayah";
+
+        const currentAyah = segments[segIdx]?.verse_key?.split(":")[1] || "global";
+        let vCurrent = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
+        const prevAyah = segments[segIdx - 1]?.verse_key?.split(":")[1] || "global";
+        let vPrev = bgMediaRef.current[prevAyah] || bgMediaRef.current["global"];
+
+        const textAlpha = textAlphaFor(currentSeg, t, settings.animationSpeed);
+
+        // ── Skip frames whose composition is byte-identical to the last one ──
+        // For still images and solid/gradient/pattern themes with Ken Burns
+        // off, most consecutive frames are the same, so the render pass
+        // collapses to roughly one draw per verse. Anything genuinely
+        // time-varying is folded into the signature below and still redraws.
+        const generatedAnimates =
+          !!activeTheme?.generated &&
+          (activeTheme.generated.type === "particles" ||
+            activeTheme.generated.type === "bokeh");
+        const bgTime =
+          vCurrent instanceof HTMLVideoElement
+            ? vCurrent.currentTime.toFixed(4)
+            : "static";
+        const prevBgTime =
+          vPrev instanceof HTMLVideoElement ? vPrev.currentTime.toFixed(4) : "static";
+        const timeVarying = settings.kenBurns || generatedAnimates || settings.grain;
+        const sig = [
+          w,
+          h,
+          segIdx,
+          segments[segIdx]?.verse_key ?? "",
+          textAlpha.toFixed(4),
+          bgTime,
+          isTransitioning ? prevBgTime + ":" + crossfadeProgress.toFixed(4) : "",
+          timeVarying ? t.toFixed(4) : "0",
+          transform.zoom,
+          transform.x,
+          transform.y,
+          settings.frame,
+          settings.themeId,
+          settings.customBg ? "custom" : "theme",
+          settings.bgMode,
+          settings.blur,
+          settings.overlayDarkness,
+          settings.vignette ? 1 : 0,
+          settings.grain ? 1 : 0,
+          settings.watermark.type,
+          settings.watermark.text,
+          settings.watermark.position,
+        ].join("|");
+        if (sig === lastSigRef.current) return;
+        lastSigRef.current = sig;
+
         if (typeof ctx.reset === "function") {
           ctx.reset();
         } else {
@@ -399,11 +557,6 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
 
         ctx.fillStyle = "#000000";
         ctx.fillRect(0, 0, w, h);
-
-        // Hoisted out of drawMedia: this used to run a linear THEMES.find() on
-        // every drawMedia call, which is up to 4x per frame.
-        const activeTheme = THEMES.find((th) => th.id === settings.themeId);
-        const wantsVideo = !!settings.customBg || !!activeTheme?.video || settings.bgMode === "per-ayah";
 
         const drawMedia = (v: HTMLVideoElement | HTMLImageElement | null, alpha: number, box: {x:number,y:number,w:number,h:number}, blurVal: number, applyTransform: boolean) => {
           const vw = ((v as any)?.videoWidth ?? (v as HTMLImageElement)?.naturalWidth ?? 0) as number;
@@ -434,9 +587,11 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
               dx += (tPanX / 100) * (dw / 2);
               dy += (tPanY / 100) * (dh / 2);
 
-              if (blurVal > 0) ctx.filter = `blur(${blurVal}px)`;
-              ctx.drawImage(v as CanvasImageSource, dx, dy, dw, dh);
-              ctx.filter = "none";
+              if (blurVal > 0) {
+                drawBlurred(ctx, v as CanvasImageSource, dx, dy, dw, dh, blurVal);
+              } else {
+                ctx.drawImage(v as CanvasImageSource, dx, dy, dw, dh);
+              }
             } catch {
               if (alpha === 1) {
                 ctx.fillStyle = "#0B0F0E";
@@ -456,11 +611,6 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           }
           ctx.globalAlpha = 1.0;
         };
-
-        const currentAyah = segments[segIdx]?.verse_key?.split(":")[1] || "global";
-        let vCurrent = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
-        const prevAyah = segments[segIdx - 1]?.verse_key?.split(":")[1] || "global";
-        let vPrev = bgMediaRef.current[prevAyah] || bgMediaRef.current["global"];
 
         // 1. Draw full screen background only for blurred frames
         if (settings.frame === "blurred-glass" || settings.frame === "blurred-glass-square") {
@@ -518,18 +668,21 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           ctx.fillRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h);
         }
         if (settings.vignette) {
-          const r1 = Math.min(clipBox.w, clipBox.h) * 0.3;
-          const r2 = Math.max(clipBox.w, clipBox.h) * 0.7;
-          const grad = ctx.createRadialGradient(clipBox.x + clipBox.w / 2, clipBox.y + clipBox.h / 2, r1, clipBox.x + clipBox.w / 2, clipBox.y + clipBox.h / 2, r2);
-          grad.addColorStop(0, "rgba(0,0,0,0)");
-          grad.addColorStop(1, "rgba(0,0,0,0.65)");
-          ctx.fillStyle = grad;
-          ctx.fillRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h);
+          const vig = getVignette(clipBox.w, clipBox.h);
+          if (vig) ctx.drawImage(vig, clipBox.x, clipBox.y, clipBox.w, clipBox.h);
         }
         if (settings.grain) {
-          for (let i = 0; i < 400; i++) {
-            ctx.fillStyle = `rgba(255,255,255,${Math.random() * 0.04})`;
-            ctx.fillRect(clipBox.x + Math.random() * clipBox.w, clipBox.y + Math.random() * clipBox.h, 1, 1);
+          const tile = getGrainTile();
+          const pat = tile ? ctx.createPattern(tile, "repeat") : null;
+          if (pat) {
+            // Jitter the tile origin each frame so the grain still shimmers.
+            const ox = Math.floor(Math.random() * GRAIN_TILE);
+            const oy = Math.floor(Math.random() * GRAIN_TILE);
+            ctx.save();
+            ctx.translate(-ox, -oy);
+            ctx.fillStyle = pat;
+            ctx.fillRect(clipBox.x + ox, clipBox.y + oy, clipBox.w, clipBox.h);
+            ctx.restore();
           }
         }
         
@@ -570,7 +723,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
             ctx.fillText(label, tx, ty);
           }
         }
-        drawText(ctx, settings, verses, segments, t, segIdx, w, h);
+        drawText(ctx, settings, verses, segments, textAlpha, segIdx, w, h);
       },
       [settings, verses, segments],
     );
@@ -860,16 +1013,35 @@ function drawGeneratedBg(
   }
 }
 
+/** Fade in at the start of a verse and out at its end. */
+function textAlphaFor(
+  seg: Segment | undefined,
+  t: number,
+  animationSpeed: number,
+): number {
+  if (!seg) return 1;
+  const inSeg = Math.max(0, t - seg.start);
+  const speed = 0.4 / animationSpeed;
+  let alpha = Math.min(1, inSeg / speed);
+  if (seg.duration - inSeg < speed) {
+    // fade completely out during padding
+    alpha = Math.max(0, (seg.duration - inSeg) / speed);
+  }
+  return alpha;
+}
+
 function drawText(
   ctx: CanvasRenderingContext2D,
   s: ProjectSettings,
   verses: Verse[],
   segments: Segment[],
-  t: number,
+  alpha: number,
   segIdx: number,
   w: number,
   h: number,
 ) {
+  if (alpha <= 0) return;
+
   const selected = verses.filter(
     (v) => v.verse_number >= s.fromAyah && v.verse_number <= s.toAyah,
   );
@@ -880,8 +1052,79 @@ function drawText(
     : undefined;
   const currentVerse =
     (seg && selected.find((v) => v.verse_key === seg.verse_key)) ?? selected[0];
+
+  const layer = getTextLayer(s, currentVerse, w, h);
+  if (!layer) return;
+
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(layer, 0, 0);
+  ctx.globalAlpha = 1;
+}
+
+/**
+ * Text is identical for every frame of a verse, so paint it once into an
+ * offscreen layer and reuse it. Only the fade alpha varies per frame, and
+ * that is applied at blit time by the caller.
+ */
+function getTextLayer(
+  s: ProjectSettings,
+  verse: Verse,
+  w: number,
+  h: number,
+): HTMLCanvasElement | null {
+  const translation =
+    verse.translations?.[0]?.text?.replace(/<[^>]*>/g, "") ?? "";
+
+  const key = [
+    verse.verse_key,
+    w,
+    h,
+    s.layout,
+    s.platformStyle,
+    s.maxWidthPct,
+    s.textPanX || 0,
+    s.textPanY || 0,
+    s.textZoom || 1,
+    s.textColor,
+    s.textShadow ? 1 : 0,
+    s.arabicFont,
+    s.arabicSize,
+    s.lineHeight,
+    s.showAyahNumber ? 1 : 0,
+    s.ayahNumberStyle,
+    s.translationId,
+    translation.length,
+  ].join("|");
+
+  const cached = _textLayers.get(key);
+  if (cached) return cached;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const lctx = canvas.getContext("2d");
+  if (!lctx) return null;
+  paintTextLayer(lctx, s, verse, translation, w, h);
+
+  // Each layer is a full-resolution RGBA canvas, so keep only a handful.
+  if (_textLayers.size >= TEXT_LAYER_CACHE_MAX) {
+    const oldest = _textLayers.keys().next();
+    if (!oldest.done) _textLayers.delete(oldest.value);
+  }
+  _textLayers.set(key, canvas);
+  return canvas;
+}
+
+function paintTextLayer(
+  ctx: CanvasRenderingContext2D,
+  s: ProjectSettings,
+  currentVerse: Verse,
+  translation: string,
+  w: number,
+  h: number,
+) {
   let arabic = currentVerse.text_uthmani;
-  
+
   if (s.showAyahNumber) {
     const num = currentVerse.verse_number.toString().replace(/[0-9]/g, (w) => "٠١٢٣٤٥٦٧٨٩"[+w]);
     if (s.ayahNumberStyle === "ornate") {
@@ -893,9 +1136,6 @@ function drawText(
       arabic = `${arabic} ${num}`;
     }
   }
-
-  const translation =
-    currentVerse.translations?.[0]?.text?.replace(/<[^>]*>/g, "") ?? "";
 
   let maxW = w * (s.maxWidthPct / 100);
   const centerX = w / 2 + ((s.textPanX || 0) / 100) * w;
@@ -913,18 +1153,9 @@ function drawText(
   }
   baseY += ((s.textPanY || 0) / 100) * h;
 
-  let alpha = 1;
-  if (seg) {
-    const inSeg = Math.max(0, t - seg.start);
-    const speed = 0.4 / s.animationSpeed;
-    alpha = Math.min(1, inSeg / speed);
-    if (seg.duration - inSeg < speed) alpha = Math.max(0, (seg.duration - inSeg) / speed); // fade completely out during padding
-  }
-  ctx.globalAlpha = alpha;
-
   const arabicFont = ARABIC_FONTS.find((f) => f.id === s.arabicFont)?.css ?? "'Amiri', serif";
   const sizeScale = w / 1080;
-  
+
   ctx.save();
   const textZoom = s.textZoom || 1;
   if (textZoom !== 1) {
@@ -941,30 +1172,20 @@ function drawText(
     ctx.shadowOffsetY = 2;
   }
 
-  // The shrink-to-fit search below is pure text measurement, and its result
-  // is identical for every frame a given verse is on screen. Memoise it.
-  const arKey = `${arabic}|${maxW.toFixed(2)}|${s.arabicSize}|${sizeScale.toFixed(5)}|${s.lineHeight}|${arabicFont}|${h}`;
-  let arLayout = _arLayoutCache.get(arKey);
-  if (!arLayout) {
-    let searchSize = s.arabicSize * sizeScale;
-    const minSize = s.arabicSize * sizeScale * 0.35;
-    let lines: string[] = [];
-    let lineH = 0;
-    for (;;) {
-      ctx.font = `700 ${searchSize}px ${arabicFont}`;
-      lines = wrapText(ctx, arabic, maxW);
-      lineH = searchSize * s.lineHeight;
-      const lineOK = lines.length <= 4 || searchSize <= minSize;
-      const heightOK = lines.length * lineH <= h * 0.55 || searchSize <= 14;
-      if (lineOK && heightOK) break;
-      searchSize *= 0.92;
-    }
-    arLayout = { arSize: searchSize, arLines: lines, arLineH: lineH };
-    if (_arLayoutCache.size > 96) _arLayoutCache.clear();
-    _arLayoutCache.set(arKey, arLayout);
+  // Shrink-to-fit search. This now runs once per verse rather than per frame.
+  let arSize = s.arabicSize * sizeScale;
+  const minSize = s.arabicSize * sizeScale * 0.35;
+  let arLines: string[] = [];
+  let arLineH = 0;
+  for (;;) {
+    ctx.font = `700 ${arSize}px ${arabicFont}`;
+    arLines = wrapText(ctx, arabic, maxW);
+    arLineH = arSize * s.lineHeight;
+    const lineOK = arLines.length <= 4 || arSize <= minSize;
+    const heightOK = arLines.length * arLineH <= h * 0.55 || arSize <= 14;
+    if (lineOK && heightOK) break;
+    arSize *= 0.92;
   }
-  const { arSize, arLines, arLineH } = arLayout;
-  ctx.font = `700 ${arSize}px ${arabicFont}`;
 
   const arTotalH = arLines.length * arLineH;
   let y = baseY - arTotalH / 2;
@@ -979,13 +1200,7 @@ function drawText(
     ctx.font = `500 ${trSize}px Inter, sans-serif`;
     ctx.fillStyle = s.textColor;
     const trY = s.layout === "split" ? h * 0.7 : y + arLineH * 0.4;
-    const trKey = `${translation}|${maxW.toFixed(2)}|${trSize.toFixed(3)}`;
-    let trLines = _trLayoutCache.get(trKey);
-    if (!trLines) {
-      trLines = wrapText(ctx, translation, maxW);
-      if (_trLayoutCache.size > 96) _trLayoutCache.clear();
-      _trLayoutCache.set(trKey, trLines);
-    }
+    const trLines = wrapText(ctx, translation, maxW);
     const trLineH = trSize * 1.4;
     let ty = trY;
     trLines.forEach((line) => {
@@ -1000,7 +1215,6 @@ function drawText(
   if (refKey) ctx.fillText(`— ${refKey} —`, centerX, h * 0.88);
 
   ctx.shadowBlur = 0;
-  ctx.globalAlpha = 1;
   ctx.restore();
 }
 

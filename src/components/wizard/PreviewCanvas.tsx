@@ -12,6 +12,7 @@ import { ARABIC_FONTS } from "@/lib/translations";
 import { getVersesByChapter, getAyahTimings, getMp3QuranReciters, type Verse } from "@/lib/quran-api";
 import { AMBIENT_TRACKS } from "@/lib/reciters";
 import { isProNow } from "@/lib/pro-status";
+import type { BackgroundDecoder, DecodedFrame } from "@/lib/video/background-decoder";
 
 export interface PreviewHandle {
   play: () => Promise<void>;
@@ -82,6 +83,7 @@ function setSpeakerMuted(muted: boolean) {
 // ── Background video seeking ────────────────────────────────────────────
 // Seeking a paused <video> is by far the most expensive operation in the
 // export pipeline, so this helper exists to keep it as cheap as possible.
+// It is now only the fallback: see the accelerated decode path below.
 //
 // The original implementation registered requestVideoFrameCallback *inside*
 // the "seeked" listener. rVFC only fires when a video presents a NEW frame,
@@ -125,6 +127,108 @@ function seekVideoFrame(v: HTMLVideoElement, time: number): Promise<void> {
 function loopedTime(v: HTMLVideoElement, t: number): number {
   const d = v.duration;
   return Number.isFinite(d) && d > 0 ? t % d : 0;
+}
+
+// ── Accelerated background decode ───────────────────────────────────────
+// Even a well-behaved seek costs 5-40ms because browsers implement it as a
+// decoder flush and refill; 1440 of them is 7-58 seconds of an export spent
+// waiting. But an export walks time strictly forward and the clip loops, so
+// nothing about the access pattern needs random access. background-decoder
+// demuxes the MP4 and runs it through a WebCodecs VideoDecoder, which decodes
+// linearly at many times realtime and never seeks at all.
+//
+// The whole path is optional: a browser without VideoDecoder, a clip that is
+// not H.264 in a progressive MP4, or a CDN that will not hand over the bytes
+// cross-origin all just report failure and leave seekVideoFrame in charge.
+const _bgDecoders = new Map<string, Promise<BackgroundDecoder | null>>();
+const _bgFrames = new WeakMap<HTMLVideoElement, DecodedFrame>();
+
+function bgSourceUrl(v: HTMLVideoElement): string {
+  return v.currentSrc || v.src || "";
+}
+
+function getBgDecoder(url: string): Promise<BackgroundDecoder | null> {
+  let entry = _bgDecoders.get(url);
+  if (!entry) {
+    entry = (async () => {
+      try {
+        const mod = await import("@/lib/video/background-decoder");
+        return await mod.createBackgroundDecoder(url);
+      } catch {
+        return null;
+      }
+    })();
+    _bgDecoders.set(url, entry);
+  }
+  return entry;
+}
+
+/** Returns false when this clip has no accelerated path and must be seeked. */
+async function decodeBgFrame(v: HTMLVideoElement, time: number): Promise<boolean> {
+  const url = bgSourceUrl(v);
+  if (!url) return false;
+  const decoder = await getBgDecoder(url);
+  if (!decoder) return false;
+  try {
+    const frame = await decoder.frameAt(time);
+    if (!frame) return false;
+    _bgFrames.set(v, frame);
+    return true;
+  } catch {
+    _bgFrames.delete(v);
+    return false;
+  }
+}
+
+/** Decoded frames are only trusted while the element is parked for an export. */
+function bgFrame(v: HTMLVideoElement): DecodedFrame | null {
+  if (!v.paused) return null;
+  return _bgFrames.get(v) ?? null;
+}
+
+function releaseBgFrame(v: HTMLVideoElement) {
+  _bgFrames.delete(v);
+}
+
+function releaseBgDecoders() {
+  if (!_bgDecoders.size) return;
+  const entries = Array.from(_bgDecoders.values());
+  _bgDecoders.clear();
+  for (const entry of entries) {
+    entry.then((d) => d?.close()).catch(() => {});
+  }
+}
+
+// A decoded frame's presentation timestamp identifies it exactly, which the
+// frame-skip signature needs: currentTime never moves on the decode path, and
+// a background running below the output frame rate legitimately holds the same
+// frame across several output frames.
+function bgTimeSig(v: HTMLVideoElement): string {
+  const frame = bgFrame(v);
+  return frame ? "d" + frame.timestamp : v.currentTime.toFixed(4);
+}
+
+function mediaWidth(m: any): number {
+  return (m?.videoWidth || m?.naturalWidth || m?.displayWidth || 0) as number;
+}
+
+function mediaHeight(m: any): number {
+  return (m?.videoHeight || m?.naturalHeight || m?.displayHeight || 0) as number;
+}
+
+// ── Export awareness ────────────────────────────────────────────────────
+// The rAF preview loop kept compositing while an export was running, which
+// both threw away a full frame of work per tick and defeated the frame-skip
+// cache below by alternating its signature with the exporter's. drawFrame
+// stamps this on every export frame and the loop stands down until they stop.
+let _lastExportFrameAt = 0;
+
+function markExportFrame() {
+  _lastExportFrameAt = Date.now();
+}
+
+function isExportingNow(): boolean {
+  return _lastExportFrameAt > 0 && Date.now() - _lastExportFrameAt < 1500;
 }
 
 // ── Cheap blur ──────────────────────────────────────────────────────────
@@ -388,6 +492,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
     useEffect(() => {
       bgMediaRef.current = {};
       lastSigRef.current = "";
+      releaseBgDecoders();
       const theme = THEMES.find((t) => t.id === settings.themeId);
 
       const loadImage = (src: string, key: string) => {
@@ -515,11 +620,9 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           (activeTheme.generated.type === "particles" ||
             activeTheme.generated.type === "bokeh");
         const bgTime =
-          vCurrent instanceof HTMLVideoElement
-            ? vCurrent.currentTime.toFixed(4)
-            : "static";
+          vCurrent instanceof HTMLVideoElement ? bgTimeSig(vCurrent) : "static";
         const prevBgTime =
-          vPrev instanceof HTMLVideoElement ? vPrev.currentTime.toFixed(4) : "static";
+          vPrev instanceof HTMLVideoElement ? bgTimeSig(vPrev) : "static";
         const timeVarying = settings.kenBurns || generatedAnimates || settings.grain;
         const sig = [
           w,
@@ -559,10 +662,13 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         ctx.fillRect(0, 0, w, h);
 
         const drawMedia = (v: HTMLVideoElement | HTMLImageElement | null, alpha: number, box: {x:number,y:number,w:number,h:number}, blurVal: number, applyTransform: boolean) => {
-          const vw = ((v as any)?.videoWidth ?? (v as HTMLImageElement)?.naturalWidth ?? 0) as number;
-          const vh = ((v as any)?.videoHeight ?? (v as HTMLImageElement)?.naturalHeight ?? 0) as number;
-          const isVideo = v && 'readyState' in v;
-          const videoReady = !!v && vw > 0 && vh > 0 && (!isVideo || (v as HTMLVideoElement).readyState >= 2);
+          // While an export is running the element is parked and its frames
+          // come from the WebCodecs decoder instead of the element itself.
+          const src: any = v instanceof HTMLVideoElement ? (bgFrame(v) ?? v) : v;
+          const vw = mediaWidth(src);
+          const vh = mediaHeight(src);
+          const isVideo = !!src && 'readyState' in src;
+          const videoReady = !!src && vw > 0 && vh > 0 && (!isVideo || (src as HTMLVideoElement).readyState >= 2);
           
           ctx.globalAlpha = alpha;
           if (wantsVideo && videoReady) {
@@ -588,9 +694,9 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
               dy += (tPanY / 100) * (dh / 2);
 
               if (blurVal > 0) {
-                drawBlurred(ctx, v as CanvasImageSource, dx, dy, dw, dh, blurVal);
+                drawBlurred(ctx, src as CanvasImageSource, dx, dy, dw, dh, blurVal);
               } else {
-                ctx.drawImage(v as CanvasImageSource, dx, dy, dw, dh);
+                ctx.drawImage(src as CanvasImageSource, dx, dy, dw, dh);
               }
             } catch {
               if (alpha === 1) {
@@ -730,7 +836,20 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
 
     // rAF render loop — time derived from AudioContext for perfect sync
     useEffect(() => {
+      let wasExporting = false;
       const loop = () => {
+        // Stand down while an export drives the canvas: this pass would
+        // otherwise composite a whole extra frame per tick and its signature
+        // would defeat the frame-skip cache for every exported frame.
+        if (isExportingNow()) {
+          wasExporting = true;
+          rafRef.current = requestAnimationFrame(loop);
+          return;
+        }
+        if (wasExporting) {
+          wasExporting = false;
+          lastSigRef.current = "";
+        }
         let t = localTimeRef.current;
         let idx = currentSegIdxRef.current;
         
@@ -791,6 +910,16 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
             connectReciterToCtx(reciterAudioRef.current);
             reciterAudioRef.current.playbackRate = settings.audioSpeed;
           }
+
+          // An export parks the background clip and hands drawing over to the
+          // decoder; live playback needs the element running again.
+          Object.values(bgMediaRef.current).forEach((m) => {
+            if (m instanceof HTMLVideoElement) {
+              releaseBgFrame(m);
+              if (m.paused) m.play().catch(() => {});
+            }
+          });
+          lastSigRef.current = "";
 
           // Schedule audio fade-out for preview
           const masterGain = getMasterGain();
@@ -863,6 +992,7 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
         getCurrentTime: () => localTimeRef.current,
         muteSpeakers: (muted: boolean) => setSpeakerMuted(muted),
         drawFrame: async (t: number, isExporting?: boolean) => {
+          if (isExporting) markExportFrame();
           const clamped = Math.max(0, Math.min(t, duration));
           const targetAbsTime = segments[0]?.start + clamped; // use start instead of absoluteStart which doesn't exist on PreviewHandle type
           let idx = segments.findIndex(sg => targetAbsTime >= sg.start && targetAbsTime < (sg.start + sg.duration));
@@ -875,9 +1005,16 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
             const v = activeBg;
             if (isExporting) {
               v.pause(); // Crucial to prevent decoder artifacts
-              await seekVideoFrame(v, loopedTime(v, clamped));
-            } else if (v.paused) {
-              v.play().catch(() => {});
+              const target = loopedTime(v, clamped);
+              // Decode forward -- a few milliseconds -- and only seek when the
+              // accelerated path is unavailable for this clip.
+              if (!(await decodeBgFrame(v, target))) {
+                releaseBgFrame(v);
+                await seekVideoFrame(v, target);
+              }
+            } else {
+              releaseBgFrame(v);
+              if (v.paused) v.play().catch(() => {});
             }
           }
           draw(clamped, idx);
@@ -894,6 +1031,8 @@ export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number
           let activeBg = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
 
           if (activeBg instanceof HTMLVideoElement) {
+            // Never reuse a frame an export left behind for the thumbnail.
+            releaseBgFrame(activeBg);
             await seekVideoFrame(activeBg, loopedTime(activeBg, clamped));
           }
           draw(clamped, idx);

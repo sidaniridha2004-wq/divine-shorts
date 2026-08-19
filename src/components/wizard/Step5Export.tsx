@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useProjectState } from "@/lib/project-state";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
@@ -21,6 +21,21 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [output, setOutput] = useState<{ url: string; ext: string } | null>(null);
   
+  // A rendered reel can be tens of megabytes. Object URLs pin that blob in
+  // memory until they are revoked, so keep the live one in a ref and release it
+  // when a new render starts or the step unmounts.
+  const outputUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    outputUrlRef.current = output?.url ?? null;
+  }, [output]);
+
+  useEffect(() => {
+    return () => {
+      if (outputUrlRef.current) URL.revokeObjectURL(outputUrlRef.current);
+    };
+  }, []);
+  
   // YouTube Metadata State
   const [language, setLanguage] = useState<LanguageCode>("en");
   const [platform, setPlatform] = useState<PlatformCode>("youtube");
@@ -42,8 +57,22 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
     settings.toAyah
   );
 
+  // Match the player box to the reel's shape so the preview is not letterboxed.
+  const aspectClass =
+    settings.aspect === "1:1"
+      ? "aspect-square"
+      : settings.aspect === "16:9"
+        ? "aspect-video"
+        : settings.aspect === "4:5"
+          ? "aspect-[4/5]"
+          : "aspect-[9/16]";
+
   const doExport = async () => {
     if (!preview.current) return;
+    if (outputUrlRef.current) {
+      URL.revokeObjectURL(outputUrlRef.current);
+      outputUrlRef.current = null;
+    }
     setOutput(null);
     setProgress({ phase: "preparing", progress: 0.02 });
     try {
@@ -159,6 +188,21 @@ export function Step5Export({ preview }: { preview: React.RefObject<PreviewHandl
             </a>
           )}
         </div>
+        {output && (
+          <div className="mt-4">
+            <div className="mb-2 text-xs font-medium text-muted-foreground">
+              Watch the finished render before you download it
+            </div>
+            <video
+              key={output.url}
+              src={output.url}
+              controls
+              playsInline
+              preload="metadata"
+              className={`w-full max-w-[260px] rounded-xl border border-border bg-black object-contain ${aspectClass}`}
+            />
+          </div>
+        )}
       </div>
 
       <div className="rounded-lg border border-border bg-card p-4">

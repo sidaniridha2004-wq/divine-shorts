@@ -1,18 +1,12 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-  useCallback,
-  forwardRef,
-  useImperativeHandle,
-} from "react";
+import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from "react";
 import { useProjectState, type ProjectSettings } from "@/lib/project-state";
 import { THEMES, type GeneratedTheme } from "@/lib/themes";
 import { ARABIC_FONTS } from "@/lib/translations";
 import { getVersesByChapter, getAyahTimings, getMp3QuranReciters, type Verse } from "@/lib/quran-api";
 import { AMBIENT_TRACKS } from "@/lib/reciters";
 import { isProNow } from "@/lib/pro-status";
-import type { BackgroundDecoder, DecodedFrame } from "@/lib/video/background-decoder";
+import { BackgroundMedia, isVideoSource, type BackgroundSource, type BackgroundElement } from "@/lib/video/background-media";
+import { MediaExportError, throwIfAborted } from "@/lib/export/runtime";
 
 export interface PreviewHandle {
   play: () => Promise<void>;
@@ -26,35 +20,31 @@ export interface PreviewHandle {
   getAudioDestination: () => MediaStreamAudioDestinationNode | null;
   getMasterGain: () => GainNode | null;
   getReciterGain: () => GainNode | null;
-  getSegmentTimings: () => { verse_key: string; start: number; duration: number; absoluteStart: number; absoluteEnd: number }[];
+  getSegmentTimings: () => Segment[];
   getCurrentTime: () => number;
+  beginExport: (signal?: AbortSignal) => Promise<void>;
+  endExport: () => void;
   drawFrame: (t: number, isExporting?: boolean) => Promise<void>;
   muteSpeakers: (muted: boolean) => void;
   captureThumbnail: () => Promise<string | null>;
 }
-
 type Segment = { verse_key: string; start: number; duration: number; absoluteStart: number; absoluteEnd: number };
-
+type ExportLease = { media: BackgroundMedia; controller: AbortController; detach: () => void };
 const ASPECT_DIMS: Record<string, { w: number; h: number }> = {
-  "9:16": { w: 1080, h: 1920 },
-  "1:1": { w: 1080, h: 1080 },
-  "16:9": { w: 1920, h: 1080 },
-  "4:5": { w: 1080, h: 1350 },
+  "9:16": { w: 1080, h: 1920 }, "1:1": { w: 1080, h: 1080 },
+  "16:9": { w: 1920, h: 1080 }, "4:5": { w: 1080, h: 1350 },
 };
-
 function getDims(s: ProjectSettings) {
   const base = ASPECT_DIMS[s.aspect];
   const scale = s.resolution === 720 ? 720 / 1080 : 1;
   return { w: Math.round(base.w * scale), h: Math.round(base.h * scale) };
 }
 
-// ── Singleton AudioContext ──────────────────────────────────────────────────
 let _audioCtx: AudioContext | null = null;
 let _audioDest: MediaStreamAudioDestinationNode | null = null;
 let _masterGain: GainNode | null = null;
 let _speakerGain: GainNode | null = null;
 let _reciterGain: GainNode | null = null;
-
 function getAudioCtx(): AudioContext {
   if (!_audioCtx) {
     _audioCtx = new AudioContext();
@@ -62,12 +52,9 @@ function getAudioCtx(): AudioContext {
     _masterGain = _audioCtx.createGain();
     _speakerGain = _audioCtx.createGain();
     _reciterGain = _audioCtx.createGain();
-    
     _reciterGain.connect(_masterGain);
-    
     _masterGain.connect(_speakerGain);
     _speakerGain.connect(_audioCtx.destination);
-    
     _masterGain.connect(_audioDest);
   }
   if (_audioCtx.state === "suspended") _audioCtx.resume().catch(() => {});
@@ -76,1302 +63,508 @@ function getAudioCtx(): AudioContext {
 function getAudioDest() { getAudioCtx(); return _audioDest!; }
 function getMasterGain() { getAudioCtx(); return _masterGain!; }
 function getReciterGain() { getAudioCtx(); return _reciterGain!; }
-function setSpeakerMuted(muted: boolean) {
-  if (_speakerGain) _speakerGain.gain.value = muted ? 0 : 1;
-}
-
-// ── Background video seeking ────────────────────────────────────────────
-// Seeking a paused <video> is by far the most expensive operation in the
-// export pipeline, so this helper exists to keep it as cheap as possible.
-// It is now only the fallback: see the accelerated decode path below.
-//
-// The original implementation registered requestVideoFrameCallback *inside*
-// the "seeked" listener. rVFC only fires when a video presents a NEW frame,
-// which a paused element that has just finished seeking never does -- so the
-// callback almost never ran and virtually every frame fell through to the
-// 1500ms safety timeout instead. Compounding that, the skip threshold was
-// 0.05s while one frame at 30fps is only 0.0333s, so the seek fired on
-// roughly every other frame and the background silently ran at ~15fps.
-// A 48s reel therefore spent ~720 seeks x 1.5s ~= 18 minutes waiting.
-//
-// "seeked" already guarantees the frame is decoded and drawable, so resolve
-// on it directly and keep only a short safety net.
-const SEEK_EPSILON = 0.015;
-const SEEK_TIMEOUT_MS = 250;
-
-function seekVideoFrame(v: HTMLVideoElement, time: number): Promise<void> {
-  // A non-finite duration (still loading, or a stream) used to produce a NaN
-  // currentTime assignment, after which "seeked" never fires at all.
-  if (!Number.isFinite(time) || v.readyState < 2) return Promise.resolve();
-  if (Math.abs(v.currentTime - time) < SEEK_EPSILON) return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const done = () => {
-      if (settled) return;
-      settled = true;
-      if (timer !== undefined) clearTimeout(timer);
-      v.removeEventListener("seeked", done);
-      resolve();
-    };
-    v.addEventListener("seeked", done, { once: true });
-    timer = setTimeout(done, SEEK_TIMEOUT_MS);
-    try {
-      v.currentTime = time;
-    } catch {
-      done();
-    }
-  });
-}
-
-function loopedTime(v: HTMLVideoElement, t: number): number {
-  const d = v.duration;
-  return Number.isFinite(d) && d > 0 ? t % d : 0;
-}
-
-// ── Accelerated background decode ───────────────────────────────────────
-// Even a well-behaved seek costs 5-40ms because browsers implement it as a
-// decoder flush and refill; 1440 of them is 7-58 seconds of an export spent
-// waiting. But an export walks time strictly forward and the clip loops, so
-// nothing about the access pattern needs random access. background-decoder
-// demuxes the MP4 and runs it through a WebCodecs VideoDecoder, which decodes
-// linearly at many times realtime and never seeks at all.
-//
-// The whole path is optional: a browser without VideoDecoder, a clip that is
-// not H.264 in a progressive MP4, or a CDN that will not hand over the bytes
-// cross-origin all just report failure and leave seekVideoFrame in charge.
-const _bgDecoders = new Map<string, Promise<BackgroundDecoder | null>>();
-const _bgFrames = new WeakMap<HTMLVideoElement, DecodedFrame>();
-
-function bgSourceUrl(v: HTMLVideoElement): string {
-  return v.currentSrc || v.src || "";
-}
-
-function getBgDecoder(url: string): Promise<BackgroundDecoder | null> {
-  let entry = _bgDecoders.get(url);
-  if (!entry) {
-    entry = (async () => {
-      try {
-        const mod = await import("@/lib/video/background-decoder");
-        return await mod.createBackgroundDecoder(url);
-      } catch {
-        return null;
-      }
-    })();
-    _bgDecoders.set(url, entry);
-  }
-  return entry;
-}
-
-/** Returns false when this clip has no accelerated path and must be seeked. */
-async function decodeBgFrame(v: HTMLVideoElement, time: number): Promise<boolean> {
-  const url = bgSourceUrl(v);
-  if (!url) return false;
-  const decoder = await getBgDecoder(url);
-  if (!decoder) return false;
-  try {
-    const frame = await decoder.frameAt(time);
-    if (!frame) return false;
-    _bgFrames.set(v, frame);
-    return true;
-  } catch {
-    _bgFrames.delete(v);
-    return false;
-  }
-}
-
-/** Decoded frames are only trusted while the element is parked for an export. */
-function bgFrame(v: HTMLVideoElement): DecodedFrame | null {
-  if (!v.paused) return null;
-  return _bgFrames.get(v) ?? null;
-}
-
-function releaseBgFrame(v: HTMLVideoElement) {
-  _bgFrames.delete(v);
-}
-
-function releaseBgDecoders() {
-  if (!_bgDecoders.size) return;
-  const entries = Array.from(_bgDecoders.values());
-  _bgDecoders.clear();
-  for (const entry of entries) {
-    entry.then((d) => d?.close()).catch(() => {});
-  }
-}
-
-// A decoded frame's presentation timestamp identifies it exactly, which the
-// frame-skip signature needs: currentTime never moves on the decode path, and
-// a background running below the output frame rate legitimately holds the same
-// frame across several output frames.
-function bgTimeSig(v: HTMLVideoElement): string {
-  const frame = bgFrame(v);
-  return frame ? "d" + frame.timestamp : v.currentTime.toFixed(4);
-}
-
-function mediaWidth(m: any): number {
-  return (m?.videoWidth || m?.naturalWidth || m?.displayWidth || 0) as number;
-}
-
-function mediaHeight(m: any): number {
-  return (m?.videoHeight || m?.naturalHeight || m?.displayHeight || 0) as number;
-}
-
-// ── Export awareness ────────────────────────────────────────────────────
-// The rAF preview loop kept compositing while an export was running, which
-// both threw away a full frame of work per tick and defeated the frame-skip
-// cache below by alternating its signature with the exporter's. drawFrame
-// stamps this on every export frame and the loop stands down until they stop.
-let _lastExportFrameAt = 0;
-
-function markExportFrame() {
-  _lastExportFrameAt = Date.now();
-}
-
-function isExportingNow(): boolean {
-  return _lastExportFrameAt > 0 && Date.now() - _lastExportFrameAt < 1500;
-}
-
-// ── Cheap blur ──────────────────────────────────────────────────────────
-// ctx.filter = "blur(40px)" on a 1080x1920 canvas is a separable gaussian
-// convolution over ~2 million pixels and costs tens of milliseconds PER CALL.
-// The blurred-glass frames issue two of them per frame, which across 1440
-// frames was minutes of the export on its own.
-//
-// Downscaling by roughly the blur radius and letting bilinear filtering
-// smooth the image on the way back up is visually near-identical at the large
-// radii used here, for a small fraction of the cost.
-let _blurScratch: HTMLCanvasElement | null = null;
-
-function getBlurScratch(w: number, h: number): HTMLCanvasElement {
-  if (!_blurScratch) _blurScratch = document.createElement("canvas");
-  if (_blurScratch.width !== w || _blurScratch.height !== h) {
-    _blurScratch.width = w;
-    _blurScratch.height = h;
-  }
-  return _blurScratch;
-}
-
-function drawBlurred(
-  ctx: CanvasRenderingContext2D,
-  src: CanvasImageSource,
-  dx: number,
-  dy: number,
-  dw: number,
-  dh: number,
-  radius: number,
-) {
-  const factor = Math.min(16, Math.max(2, Math.round(radius / 2)));
-  const sw = Math.max(2, Math.round(dw / factor));
-  const sh = Math.max(2, Math.round(dh / factor));
-  const scratch = getBlurScratch(sw, sh);
-  const sctx = scratch.getContext("2d");
-  if (!sctx) {
-    ctx.drawImage(src, dx, dy, dw, dh);
-    return;
-  }
-  sctx.clearRect(0, 0, sw, sh);
-  sctx.imageSmoothingEnabled = true;
-  sctx.imageSmoothingQuality = "high";
-  sctx.drawImage(src, 0, 0, sw, sh);
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(scratch, 0, 0, sw, sh, dx, dy, dw, dh);
-}
-
-// ── Cached vignette ─────────────────────────────────────────────────────
-// Depends only on the clip box size, so building the radial gradient and
-// filling it on every frame was pure waste.
-let _vignette: { key: string; canvas: HTMLCanvasElement } | null = null;
-
-function getVignette(w: number, h: number): HTMLCanvasElement | null {
-  const iw = Math.max(1, Math.round(w));
-  const ih = Math.max(1, Math.round(h));
-  const key = iw + "x" + ih;
-  if (_vignette && _vignette.key === key) return _vignette.canvas;
-  const c = document.createElement("canvas");
-  c.width = iw;
-  c.height = ih;
-  const g = c.getContext("2d");
-  if (!g) return null;
-  const r1 = Math.min(iw, ih) * 0.3;
-  const r2 = Math.max(iw, ih) * 0.7;
-  const grad = g.createRadialGradient(iw / 2, ih / 2, r1, iw / 2, ih / 2, r2);
-  grad.addColorStop(0, "rgba(0,0,0,0)");
-  grad.addColorStop(1, "rgba(0,0,0,0.65)");
-  g.fillStyle = grad;
-  g.fillRect(0, 0, iw, ih);
-  _vignette = { key, canvas: c };
-  return c;
-}
-
-// ── Cached film grain ───────────────────────────────────────────────────
-// Was 400 separate fillRect calls per frame. A tileable noise texture gives
-// the same look in a single blit, and jittering the origin keeps it moving.
-const GRAIN_TILE = 256;
-let _grainTile: HTMLCanvasElement | null = null;
-
-function getGrainTile(): HTMLCanvasElement | null {
-  if (_grainTile) return _grainTile;
-  const c = document.createElement("canvas");
-  c.width = GRAIN_TILE;
-  c.height = GRAIN_TILE;
-  const g = c.getContext("2d");
-  if (!g) return null;
-  const img = g.createImageData(GRAIN_TILE, GRAIN_TILE);
-  const d = img.data;
-  for (let i = 0; i < d.length; i += 4) {
-    d[i] = 255;
-    d[i + 1] = 255;
-    d[i + 2] = 255;
-    // Sparse bright specks, matching the density of the old random dots.
-    d[i + 3] = Math.random() < 0.06 ? Math.random() * 26 : 0;
-  }
-  g.putImageData(img, 0, 0);
-  _grainTile = c;
-  return c;
-}
-
-// ── Cached text layer ───────────────────────────────────────────────────
-// The Arabic text, translation, ayah number and reference are identical for
-// every frame of a given verse, yet they were re-rendered from scratch each
-// time -- including drop shadows and a shrink-to-fit search that calls
-// measureText once per word. Painting once per verse into an offscreen layer
-// and blitting it with the fade alpha turns ~1440 text renders into ~7.
-const TEXT_LAYER_CACHE_MAX = 4;
-const _textLayers = new Map<string, HTMLCanvasElement>();
-
-// ── Duration probing (fallback) ─────────────────────────────────────────
-function probeDuration(url: string): Promise<number | null> {
-  return new Promise((resolve) => {
-    const a = new Audio();
-    a.crossOrigin = "anonymous";
-    let settled = false;
-    const done = (v: number | null) => {
-      if (settled) return;
-      settled = true;
-      a.onloadedmetadata = null;
-      a.onerror = null;
-      resolve(v);
-    };
-    a.preload = "metadata";
-    a.onloadedmetadata = () =>
-      done(Number.isFinite(a.duration) && a.duration > 0 ? a.duration : null);
-    a.onerror = () => done(null);
-    a.src = url;
-    setTimeout(() => done(null), 8000);
-  });
-}
-
+function setSpeakerMuted(muted: boolean) { if (_speakerGain) _speakerGain.gain.value = muted ? 0 : 1; }
 const _connectedAmbient = new WeakSet<HTMLAudioElement>();
 function connectAmbientToCtx(el: HTMLAudioElement) {
   if (_connectedAmbient.has(el)) return;
   _connectedAmbient.add(el);
-  try {
-    const ctx = getAudioCtx();
-    const src = ctx.createMediaElementSource(el);
-    src.connect(getMasterGain());
-  } catch (e) {
-    console.warn("ambient connect failed", e);
-  }
+  try { getAudioCtx().createMediaElementSource(el).connect(getMasterGain()); }
+  catch (e) { console.warn("ambient connect failed", e); }
 }
-
 const _connectedReciter = new WeakSet<HTMLAudioElement>();
 function connectReciterToCtx(el: HTMLAudioElement) {
   if (_connectedReciter.has(el)) return;
   _connectedReciter.add(el);
-  try {
-    const ctx = getAudioCtx();
-    const src = ctx.createMediaElementSource(el);
-    src.connect(getReciterGain());
-  } catch (e) {
-    console.warn("reciter connect failed", e);
-  }
+  try { getAudioCtx().createMediaElementSource(el).connect(getReciterGain()); }
+  catch (e) { console.warn("reciter connect failed", e); }
 }
+
+function mediaWidth(m: BackgroundElement) { return m instanceof HTMLVideoElement ? m.videoWidth : m.naturalWidth; }
+function mediaHeight(m: BackgroundElement) { return m instanceof HTMLVideoElement ? m.videoHeight : m.naturalHeight; }
+function drawable(m: BackgroundElement | undefined): m is BackgroundElement {
+  return !!m && mediaWidth(m) > 0 && mediaHeight(m) > 0 && (!(m instanceof HTMLVideoElement) || (m.readyState >= 2 && !m.seeking));
+}
+
+let _blurScratch: HTMLCanvasElement | null = null;
+function drawBlurred(ctx: CanvasRenderingContext2D, src: CanvasImageSource, dx: number, dy: number, dw: number, dh: number, radius: number) {
+  const factor = Math.min(16, Math.max(2, Math.round(radius / 2)));
+  const sw = Math.max(2, Math.round(dw / factor)), sh = Math.max(2, Math.round(dh / factor));
+  if (!_blurScratch) _blurScratch = document.createElement("canvas");
+  if (_blurScratch.width !== sw || _blurScratch.height !== sh) { _blurScratch.width = sw; _blurScratch.height = sh; }
+  const g = _blurScratch.getContext("2d");
+  if (!g) { ctx.drawImage(src, dx, dy, dw, dh); return; }
+  g.clearRect(0, 0, sw, sh);
+  g.imageSmoothingEnabled = true;
+  g.imageSmoothingQuality = "high";
+  g.drawImage(src, 0, 0, sw, sh);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(_blurScratch, 0, 0, sw, sh, dx, dy, dw, dh);
+}
+let _vignette: { key: string; canvas: HTMLCanvasElement } | null = null;
+function getVignette(w: number, h: number): HTMLCanvasElement | null {
+  const iw = Math.max(1, Math.round(w)), ih = Math.max(1, Math.round(h)), key = iw + "x" + ih;
+  if (_vignette?.key === key) return _vignette.canvas;
+  const c = document.createElement("canvas"); c.width = iw; c.height = ih;
+  const g = c.getContext("2d"); if (!g) return null;
+  const grad = g.createRadialGradient(iw / 2, ih / 2, Math.min(iw, ih) * 0.3, iw / 2, ih / 2, Math.max(iw, ih) * 0.7);
+  grad.addColorStop(0, "rgba(0,0,0,0)"); grad.addColorStop(1, "rgba(0,0,0,0.65)");
+  g.fillStyle = grad; g.fillRect(0, 0, iw, ih);
+  _vignette = { key, canvas: c }; return c;
+}
+const GRAIN_TILE = 256;
+let _grainTile: HTMLCanvasElement | null = null;
+function getGrainTile(): HTMLCanvasElement | null {
+  if (_grainTile) return _grainTile;
+  const c = document.createElement("canvas"); c.width = c.height = GRAIN_TILE;
+  const g = c.getContext("2d"); if (!g) return null;
+  const img = g.createImageData(GRAIN_TILE, GRAIN_TILE);
+  for (let i = 0; i < img.data.length; i += 4) {
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
+    img.data[i + 3] = Math.random() < 0.06 ? Math.random() * 26 : 0;
+  }
+  g.putImageData(img, 0, 0); _grainTile = c; return c;
+}
+const TEXT_LAYER_CACHE_MAX = 4;
+const _textLayers = new Map<string, HTMLCanvasElement>();
 
 export const PreviewCanvas = forwardRef<PreviewHandle, { onProgress?: (t: number, d: number) => void }>(
   function PreviewCanvas({ onProgress }, ref) {
     const { settings } = useProjectState();
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const bgMediaRef = useRef<Record<string, HTMLVideoElement | HTMLImageElement>>({});
+    const mediaRef = useRef<BackgroundMedia | null>(null);
+    const exportRef = useRef<ExportLease | null>(null);
+    const mediaVersionRef = useRef(0);
     const reciterAudioRef = useRef<HTMLAudioElement>(null);
     const ambientRef = useRef<HTMLAudioElement>(null);
     const rafRef = useRef<number | null>(null);
-    const lastSigRef = useRef<string>("");
+    const lastSigRef = useRef("");
     const [verses, setVerses] = useState<Verse[]>([]);
     const [segments, setSegments] = useState<Segment[]>([]);
     const [playing, setPlaying] = useState(false);
     const [duration, setDuration] = useState(0);
     const [ready, setReady] = useState(false);
+    const [backgroundState, setBackgroundState] = useState<{ loading: boolean; error: string | null }>({ loading: true, error: null });
+    const [reloadBackground, setReloadBackground] = useState(0);
     const localTimeRef = useRef(0);
     const currentSegIdxRef = useRef(0);
 
-    // Load verses when chapter or translation changes
     useEffect(() => {
       let alive = true;
-      setReady(false);
-      getVersesByChapter(settings.chapterId, {
-        translationIds: settings.translationId ? [settings.translationId] : [],
-        words: false,
-      })
-        .then((v) => {
-          if (!alive) return;
-          setVerses(v);
-        })
-        .catch(() => {});
-      return () => {
-        alive = false;
-      };
+      setVerses([]);
+      getVersesByChapter(settings.chapterId, { translationIds: settings.translationId ? [settings.translationId] : [], words: false })
+        .then(v => { if (alive) setVerses(v); }).catch(() => {});
+      return () => { alive = false; };
     }, [settings.chapterId, settings.translationId]);
-
-    // Load audio timings and set up single reciter stream
     useEffect(() => {
       let alive = true;
-      setReady(false);
-      setSegments([]);
-      setDuration(0);
+      setReady(false); setSegments([]); setDuration(0);
       (async () => {
         const timings = await getAyahTimings(settings.chapterId, settings.reciterId);
         const reciters = await getMp3QuranReciters();
         const reciter = reciters.find(r => r.id === settings.reciterId);
-        
         if (!alive) return;
-        if (!timings.length || !reciter) {
-          setSegments([]);
-          setReady(true);
-          return;
-        }
-
         const filtered = timings.filter(t => t.ayah >= settings.fromAyah && t.ayah <= settings.toAyah);
-        if (!filtered.length) {
-          setSegments([]);
-          setReady(true);
-          return;
-        }
-
-        const audioUrl = `${reciter.folder_url}${String(settings.chapterId).padStart(3, '0')}.mp3`;
-        if (reciterAudioRef.current && reciterAudioRef.current.src !== audioUrl) {
-          reciterAudioRef.current.src = audioUrl;
-          reciterAudioRef.current.load();
-        }
-
+        if (!filtered.length || !reciter) { setSegments([]); setReady(true); return; }
+        const audioUrl = `${reciter.folder_url}${String(settings.chapterId).padStart(3, "0")}.mp3`;
+        if (reciterAudioRef.current && reciterAudioRef.current.src !== audioUrl) { reciterAudioRef.current.src = audioUrl; reciterAudioRef.current.load(); }
         const baseOffset = filtered[0].start_time / 1000;
-        const PADDING = 2.0; // 2s padding to give the video an outro, while audio fades out
-        const totalDuration = (filtered[filtered.length - 1].end_time / 1000) - baseOffset + PADDING;
-
-        const newSegments = filtered.map((t, idx) => {
-          const absStart = t.start_time / 1000;
-          let absEnd = t.end_time / 1000;
-          // Padding is added to totalDuration, not to the last segment's duration
-          
-          return {
-            verse_key: `${settings.chapterId}:${t.ayah}`,
-            start: absStart - baseOffset,
-            duration: absEnd - absStart,
-            absoluteStart: absStart,
-            absoluteEnd: absEnd,
-          };
-        });
-
-        currentSegIdxRef.current = 0;
-        localTimeRef.current = 0;
-        setSegments(newSegments);
-        setDuration(totalDuration);
-        setReady(true);
-      })().catch(() => {
-        if (alive) {
-          setSegments([]);
-          setReady(true);
-        }
-      });
-      return () => {
-        alive = false;
-      };
+        const total = filtered[filtered.length - 1].end_time / 1000 - baseOffset + 2;
+        const next = filtered.map(t => ({ verse_key: `${settings.chapterId}:${t.ayah}`, start: t.start_time / 1000 - baseOffset, duration: (t.end_time - t.start_time) / 1000, absoluteStart: t.start_time / 1000, absoluteEnd: t.end_time / 1000 }));
+        currentSegIdxRef.current = 0; localTimeRef.current = 0;
+        setSegments(next); setDuration(total); setReady(true);
+      })().catch(() => { if (alive) { setSegments([]); setReady(true); } });
+      return () => { alive = false; };
     }, [settings.reciterId, settings.chapterId, settings.fromAyah, settings.toAyah]);
 
-    // Load background
+    // A video is registered before loading begins. There is no poster replacement,
+    // duplicate decoder, or unguarded late onloadeddata callback.
     useEffect(() => {
-      bgMediaRef.current = {};
-      lastSigRef.current = "";
-      releaseBgDecoders();
-      const theme = THEMES.find((t) => t.id === settings.themeId);
-
-      const loadImage = (src: string, key: string) => {
-        const img = new Image();
-        img.crossOrigin = "anonymous";
-        img.onload = () => {
-          if (!bgMediaRef.current[key] || !(bgMediaRef.current[key] instanceof HTMLVideoElement)) {
-            bgMediaRef.current[key] = img;
-            lastSigRef.current = "";
-          }
-        };
-        img.src = src;
-      };
-
-      const loadVideo = (src: string, key: string) => {
-        const v = document.createElement("video");
-        v.crossOrigin = "anonymous";
-        v.muted = true;
-        v.loop = true;
-        v.playsInline = true;
-        // "auto" keeps the whole clip buffered, which is what makes the
-        // per-frame export seeks cheap instead of network-bound.
-        v.preload = "auto";
-        v.onloadeddata = () => {
-          bgMediaRef.current[key] = v;
-          lastSigRef.current = "";
-          v.play().catch(() => {});
-        };
-        v.onerror = () => {};
-        v.src = src;
-      };
-
+      let alive = true;
+      const theme = THEMES.find(t => t.id === settings.themeId);
+      const sources: BackgroundSource[] = [];
       if (settings.bgMode === "per-ayah") {
-        Object.entries(settings.ayahBgs).forEach(([ayahNum, src]) => {
-          if (src) loadImage(src, ayahNum);
-        });
-      } else {
-        if (settings.customBg) {
-          if (settings.customBg.startsWith("data:video") || /\.(mp4|webm|mov)/i.test(settings.customBg)) {
-            loadVideo(settings.customBg, "global");
-          } else {
-            loadImage(settings.customBg, "global");
-          }
-        } else if (theme?.poster) {
-          loadImage(theme.poster, "global");
-          if (theme.video) loadVideo(theme.video, "global");
+        for (const [key, url] of Object.entries(settings.ayahBgs)) {
+          if (url && +key >= settings.fromAyah && +key <= settings.toAyah) sources.push({ key, url, kind: isVideoSource(url) ? "video" : "image" });
         }
+      } else if (settings.customBg) {
+        sources.push({ key: "global", url: settings.customBg, kind: isVideoSource(settings.customBg) ? "video" : "image" });
+      } else if (theme?.video || theme?.poster) {
+        sources.push({ key: "global", url: theme.video || theme.poster!, kind: theme.video ? "video" : "image" });
       }
-    }, [settings.bgMode, settings.ayahBgs, settings.themeId, settings.customBg]);
+      const media = new BackgroundMedia(sources);
+      mediaRef.current = media;
+      mediaVersionRef.current++;
+      lastSigRef.current = "";
+      setBackgroundState({ loading: true, error: null });
+      media.ready.then(() => { if (alive) { lastSigRef.current = ""; setBackgroundState({ loading: false, error: null }); } })
+        .catch(error => { if (alive) setBackgroundState({ loading: false, error: error instanceof Error ? error.message : "Could not load the background." }); });
+      return () => {
+        alive = false;
+        if (exportRef.current?.media === media) exportRef.current.controller.abort();
+        media.close();
+        if (mediaRef.current === media) mediaRef.current = null;
+      };
+    }, [settings.bgMode, settings.ayahBgs, settings.themeId, settings.customBg, settings.fromAyah, settings.toAyah, reloadBackground]);
 
-    // Ambient track logic
+    useEffect(() => { lastSigRef.current = ""; }, [settings, verses, segments]);
     useEffect(() => {
-      const amb = ambientRef.current;
-      if (!amb) return;
+      const amb = ambientRef.current; if (!amb) return;
       const track = AMBIENT_TRACKS.find(t => t.id === settings.ambientId);
       if (track) {
-        if (amb.src !== track.url) {
-           amb.src = track.url;
-           amb.load();
-           if (playing) amb.play().catch(() => {});
-        }
+        if (amb.src !== track.url) { amb.src = track.url; amb.load(); if (playing) amb.play().catch(() => {}); }
         amb.volume = settings.ambientVolume;
-      } else {
-        amb.pause();
-        amb.src = "";
-      }
+      } else { amb.pause(); amb.removeAttribute("src"); }
     }, [settings.ambientId, settings.ambientVolume, playing]);
 
-    const draw = useCallback(
-      (t: number, segIdx: number) => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-        const { w, h } = getDims(settings);
-        if (canvas.width !== w || canvas.height !== h) {
-          canvas.width = w;
-          canvas.height = h;
-          lastSigRef.current = "";
-        }
+    const pause = useCallback(() => {
+      reciterAudioRef.current?.pause(); ambientRef.current?.pause(); mediaRef.current?.pause();
+      if (_masterGain && _audioCtx) { _masterGain.gain.cancelScheduledValues(_audioCtx.currentTime); _masterGain.gain.value = 1; }
+      setPlaying(false);
+      // Keep the rAF scheduled; it observes an explicit export lease, not a timer.
+    }, []);
+    const endExport = useCallback(() => {
+      const lease = exportRef.current;
+      if (!lease) return;
+      lease.controller.abort(); lease.detach(); lease.media.unlock();
+      exportRef.current = null; lastSigRef.current = "";
+    }, []);
+    const beginExport = useCallback(async (signal?: AbortSignal) => {
+      if (exportRef.current) throw new MediaExportError("An export or thumbnail capture is already running.");
+      if (!verses.length) throw new MediaExportError("Wait for the verse text to finish loading before exporting.");
+      const media = mediaRef.current;
+      if (!media) throw new MediaExportError("Background is still initializing. Please retry.");
+      // Unlock audio while still inside the Render button's user gesture,
+      // before background preparation or font/audio fetches consume that gesture.
+      getAudioCtx();
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      signal?.addEventListener("abort", abort, { once: true });
+      const lease: ExportLease = { media, controller, detach: () => signal?.removeEventListener("abort", abort) };
+      exportRef.current = lease;
+      if (signal?.aborted) controller.abort();
+      pause();
+      try {
+        await media.lock(controller.signal);
+        throwIfAborted(controller.signal);
+        _textLayers.clear(); lastSigRef.current = "";
+      } catch (error) {
+        if (exportRef.current === lease) endExport();
+        throw error;
+      }
+    }, [pause, endExport, verses.length]);
+    useEffect(() => () => endExport(), [endExport]);
 
-        const currentSeg = segments[segIdx];
-        const timeInSeg = t - (currentSeg?.start || 0);
-        const TRANSITION_DUR = 1.0; // 1 second crossfade
-        const isTransitioning = settings.bgMode === "per-ayah" && segIdx > 0 && timeInSeg >= 0 && timeInSeg < TRANSITION_DUR;
-        const crossfadeProgress = isTransitioning ? timeInSeg / TRANSITION_DUR : 1;
-
-        const currentAyahNum = parseInt(segments[segIdx]?.verse_key?.split(":")[1] || "0");
-        const transform = settings.bgMode === "per-ayah" 
-          ? (settings.ayahTransforms?.[currentAyahNum] || { zoom: 1, x: 0, y: 0 })
-          : { zoom: settings.bgZoom || 1, x: settings.bgPanX || 0, y: settings.bgPanY || 0 };
-
-        let clipBox = { x: 0, y: 0, w, h };
-        if (settings.frame === "rounded" || settings.frame === "blurred-glass") {
-          const rectW = w * 0.95;
-          const rectH = rectW * (9 / 16); // 16:9 aspect ratio makes it vertically narrow
-          clipBox = { x: (w - rectW) / 2, y: (h - rectH) / 2, w: rectW, h: rectH };
-        } else if (settings.frame === "rounded-square" || settings.frame === "blurred-glass-square") {
-          const rectW = w * 0.95;
-          const rectH = rectW; // 1:1 aspect ratio
-          clipBox = { x: (w - rectW) / 2, y: (h - rectH) / 2, w: rectW, h: rectH };
+    const draw = useCallback((t: number, segIdx: number, exporting = false) => {
+      if (!exporting && exportRef.current) return;
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext("2d");
+      if (!canvas || !ctx) { if (exporting) throw new MediaExportError("Preview canvas is unavailable."); return; }
+      const media = exporting ? exportRef.current?.media : mediaRef.current;
+      const currentSeg = segments[segIdx];
+      const timeInSeg = t - (currentSeg?.start || 0);
+      const transitioning = settings.bgMode === "per-ayah" && segIdx > 0 && timeInSeg >= 0 && timeInSeg < 1;
+      const crossfade = transitioning ? timeInSeg : 1;
+      const currentKey = currentSeg?.verse_key.split(":")[1] || "global";
+      const prevKey = segments[segIdx - 1]?.verse_key.split(":")[1] || "global";
+      const current = media?.get(currentKey), previous = media?.get(prevKey);
+      const theme = THEMES.find(th => th.id === settings.themeId);
+      const generated = !settings.customBg && settings.bgMode !== "per-ayah" ? theme?.generated : undefined;
+      if ((!drawable(current) && !generated) || (transitioning && !drawable(previous))) {
+        if (exporting) throw new MediaExportError("Selected background is not ready. Export stopped rather than inserting a black frame.");
+        return; // Keep the last valid preview under the loading/error overlay.
+      }
+      const { w, h } = getDims(settings);
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; lastSigRef.current = ""; }
+      const transform = settings.bgMode === "per-ayah" ? (settings.ayahTransforms?.[+currentKey] || { zoom: 1, x: 0, y: 0 }) : { zoom: settings.bgZoom || 1, x: settings.bgPanX || 0, y: settings.bgPanY || 0 };
+      const alpha = textAlphaFor(currentSeg, t, settings.animationSpeed);
+      const animates = settings.kenBurns || settings.grain || generated?.type === "particles" || generated?.type === "bokeh";
+      const timeSig = (m: BackgroundElement | undefined) => m instanceof HTMLVideoElement ? m.currentTime.toFixed(5) : "image";
+      const sig = [w, h, mediaVersionRef.current, segIdx, alpha.toFixed(5), timeSig(current), transitioning ? timeSig(previous) + ":" + crossfade : "", animates || exporting ? t : 0, transform.zoom, transform.x, transform.y].join("|");
+      if (lastSigRef.current === sig) return;
+      try {
+        if (typeof ctx.reset === "function") ctx.reset(); else canvas.width = w;
+        ctx.fillStyle = "#000000"; ctx.fillRect(0, 0, w, h);
+        let box = { x: 0, y: 0, w, h };
+        if (["rounded", "blurred-glass", "rounded-square", "blurred-glass-square"].includes(settings.frame)) {
+          const bw = w * 0.95, bh = settings.frame.endsWith("square") ? bw : bw * 9 / 16;
+          box = { x: (w - bw) / 2, y: (h - bh) / 2, w: bw, h: bh };
         } else if (settings.frame === "arch") {
-          const rectW = w * 0.85;
-          const rectH = h * 0.55;
-          clipBox = { x: (w - rectW) / 2, y: (h - rectH) / 2, w: rectW, h: rectH };
+          box = { x: w * 0.075, y: h * 0.225, w: w * 0.85, h: h * 0.55 };
         }
-
-        const activeTheme = THEMES.find((th) => th.id === settings.themeId);
-        const wantsVideo = !!settings.customBg || !!activeTheme?.video || settings.bgMode === "per-ayah";
-
-        const currentAyah = segments[segIdx]?.verse_key?.split(":")[1] || "global";
-        let vCurrent = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
-        const prevAyah = segments[segIdx - 1]?.verse_key?.split(":")[1] || "global";
-        let vPrev = bgMediaRef.current[prevAyah] || bgMediaRef.current["global"];
-
-        const textAlpha = textAlphaFor(currentSeg, t, settings.animationSpeed);
-
-        // ── Skip frames whose composition is byte-identical to the last one ──
-        // For still images and solid/gradient/pattern themes with Ken Burns
-        // off, most consecutive frames are the same, so the render pass
-        // collapses to roughly one draw per verse. Anything genuinely
-        // time-varying is folded into the signature below and still redraws.
-        const generatedAnimates =
-          !!activeTheme?.generated &&
-          (activeTheme.generated.type === "particles" ||
-            activeTheme.generated.type === "bokeh");
-        const bgTime =
-          vCurrent instanceof HTMLVideoElement ? bgTimeSig(vCurrent) : "static";
-        const prevBgTime =
-          vPrev instanceof HTMLVideoElement ? bgTimeSig(vPrev) : "static";
-        const timeVarying = settings.kenBurns || generatedAnimates || settings.grain;
-        const sig = [
-          w,
-          h,
-          segIdx,
-          segments[segIdx]?.verse_key ?? "",
-          textAlpha.toFixed(4),
-          bgTime,
-          isTransitioning ? prevBgTime + ":" + crossfadeProgress.toFixed(4) : "",
-          timeVarying ? t.toFixed(4) : "0",
-          transform.zoom,
-          transform.x,
-          transform.y,
-          settings.frame,
-          settings.themeId,
-          settings.customBg ? "custom" : "theme",
-          settings.bgMode,
-          settings.blur,
-          settings.overlayDarkness,
-          settings.vignette ? 1 : 0,
-          settings.grain ? 1 : 0,
-          settings.watermark.type,
-          settings.watermark.text,
-          settings.watermark.position,
-        ].join("|");
-        if (sig === lastSigRef.current) return;
-        lastSigRef.current = sig;
-
-        if (typeof ctx.reset === "function") {
-          ctx.reset();
-        } else {
-          // Fallback for older browsers: force state reset by reassigning width
-          canvas.width = w;
-        }
-
-        ctx.fillStyle = "#000000";
-        ctx.fillRect(0, 0, w, h);
-
-        const drawMedia = (v: HTMLVideoElement | HTMLImageElement | null, alpha: number, box: {x:number,y:number,w:number,h:number}, blurVal: number, applyTransform: boolean) => {
-          // While an export is running the element is parked and its frames
-          // come from the WebCodecs decoder instead of the element itself.
-          const src: any = v instanceof HTMLVideoElement ? (bgFrame(v) ?? v) : v;
-          const vw = mediaWidth(src);
-          const vh = mediaHeight(src);
-          const isVideo = !!src && 'readyState' in src;
-          const videoReady = !!src && vw > 0 && vh > 0 && (!isVideo || (src as HTMLVideoElement).readyState >= 2);
-          
-          ctx.globalAlpha = alpha;
-          if (wantsVideo && videoReady) {
-            try {
-              const bleed = blurVal > 0 ? blurVal * 2 : 0;
-              const targetW = box.w + bleed * 2;
-              const targetH = box.h + bleed * 2;
-
-              const tZoom = applyTransform ? transform.zoom : 1;
-              const tPanX = applyTransform ? transform.x : 0;
-              const tPanY = applyTransform ? transform.y : 0;
-
-              let scale = Math.max(targetW / vw, targetH / vh) * (settings.kenBurns ? 1 + Math.sin(t * 0.05) * 0.05 + 0.05 : 1);
-              scale *= tZoom;
-
-              const dw = vw * scale;
-              const dh = vh * scale;
-              
-              let dx = box.x - bleed + (targetW - dw) / 2;
-              let dy = box.y - bleed + (targetH - dh) / 2;
-
-              dx += (tPanX / 100) * (dw / 2);
-              dy += (tPanY / 100) * (dh / 2);
-
-              if (blurVal > 0) {
-                drawBlurred(ctx, src as CanvasImageSource, dx, dy, dw, dh, blurVal);
-              } else {
-                ctx.drawImage(src as CanvasImageSource, dx, dy, dw, dh);
-              }
-            } catch {
-              if (alpha === 1) {
-                ctx.fillStyle = "#0B0F0E";
-                ctx.fillRect(box.x, box.y, box.w, box.h);
-              }
-            }
-          } else if (activeTheme?.generated && !settings.customBg) {
-            ctx.save();
-            ctx.translate(box.x, box.y);
-            drawGeneratedBg(ctx, activeTheme.generated, box.w, box.h, t);
-            ctx.restore();
-          } else {
-            if (alpha === 1) {
-              ctx.fillStyle = "#0B0F0E";
-              ctx.fillRect(box.x, box.y, box.w, box.h);
-            }
+        const drawMedia = (m: BackgroundElement | undefined, opacity: number, target: typeof box, blur: number, applyTransform: boolean) => {
+          ctx.globalAlpha = opacity;
+          if (m) {
+            const vw = mediaWidth(m), vh = mediaHeight(m);
+            const bleed = blur > 0 ? blur * 2 : 0;
+            const tw = target.w + bleed * 2, th = target.h + bleed * 2;
+            const zoom = applyTransform ? transform.zoom : 1;
+            const scale = Math.max(tw / vw, th / vh) * (settings.kenBurns ? 1 + Math.sin(t * 0.05) * 0.05 + 0.05 : 1) * zoom;
+            const dw = vw * scale, dh = vh * scale;
+            const dx = target.x - bleed + (tw - dw) / 2 + (applyTransform ? transform.x / 100 * dw / 2 : 0);
+            const dy = target.y - bleed + (th - dh) / 2 + (applyTransform ? transform.y / 100 * dh / 2 : 0);
+            if (blur > 0) drawBlurred(ctx, m, dx, dy, dw, dh, blur); else ctx.drawImage(m, dx, dy, dw, dh);
+          } else if (generated) {
+            ctx.save(); ctx.translate(target.x, target.y); drawGeneratedBg(ctx, generated, target.w, target.h, t); ctx.restore();
           }
-          ctx.globalAlpha = 1.0;
+          ctx.globalAlpha = 1;
         };
-
-        // 1. Draw full screen background only for blurred frames
         if (settings.frame === "blurred-glass" || settings.frame === "blurred-glass-square") {
-          const fullBox = { x: 0, y: 0, w, h };
-          
-          if (isTransitioning) {
-            drawMedia(vPrev, 1, fullBox, 40, false);
-            drawMedia(vCurrent, crossfadeProgress, fullBox, 40, false);
-          } else {
-            drawMedia(vCurrent, 1, fullBox, 40, false);
-          }
-          
-          // Darken the blurred background
-          ctx.fillStyle = "rgba(0,0,0,0.5)";
-          ctx.fillRect(0, 0, w, h);
+          const full = { x: 0, y: 0, w, h };
+          if (transitioning) { drawMedia(previous, 1, full, 40, false); drawMedia(current, crossfade, full, 40, false); }
+          else drawMedia(current, 1, full, 40, false);
+          ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(0, 0, w, h);
         }
-
-        // 2. Setup clip box for the main media
         ctx.save();
-        if (settings.frame === "rounded" || settings.frame === "blurred-glass" || settings.frame === "rounded-square" || settings.frame === "blurred-glass-square") {
+        if (["rounded", "blurred-glass", "rounded-square", "blurred-glass-square"].includes(settings.frame)) {
           const r = Math.min(w, h) * 0.05;
-          ctx.beginPath();
-          ctx.moveTo(clipBox.x + r, clipBox.y);
-          ctx.lineTo(clipBox.x + clipBox.w - r, clipBox.y);
-          ctx.quadraticCurveTo(clipBox.x + clipBox.w, clipBox.y, clipBox.x + clipBox.w, clipBox.y + r);
-          ctx.lineTo(clipBox.x + clipBox.w, clipBox.y + clipBox.h - r);
-          ctx.quadraticCurveTo(clipBox.x + clipBox.w, clipBox.y + clipBox.h, clipBox.x + clipBox.w - r, clipBox.y + clipBox.h);
-          ctx.lineTo(clipBox.x + r, clipBox.y + clipBox.h);
-          ctx.quadraticCurveTo(clipBox.x, clipBox.y + clipBox.h, clipBox.x, clipBox.y + clipBox.h - r);
-          ctx.lineTo(clipBox.x, clipBox.y + r);
-          ctx.quadraticCurveTo(clipBox.x, clipBox.y, clipBox.x + r, clipBox.y);
-          ctx.closePath();
-          ctx.clip();
+          ctx.beginPath(); ctx.moveTo(box.x + r, box.y); ctx.lineTo(box.x + box.w - r, box.y);
+          ctx.quadraticCurveTo(box.x + box.w, box.y, box.x + box.w, box.y + r);
+          ctx.lineTo(box.x + box.w, box.y + box.h - r); ctx.quadraticCurveTo(box.x + box.w, box.y + box.h, box.x + box.w - r, box.y + box.h);
+          ctx.lineTo(box.x + r, box.y + box.h); ctx.quadraticCurveTo(box.x, box.y + box.h, box.x, box.y + box.h - r);
+          ctx.lineTo(box.x, box.y + r); ctx.quadraticCurveTo(box.x, box.y, box.x + r, box.y); ctx.closePath(); ctx.clip();
         } else if (settings.frame === "arch") {
-          ctx.beginPath();
-          ctx.moveTo(clipBox.x, clipBox.y + clipBox.w / 2);
-          ctx.arc(clipBox.x + clipBox.w / 2, clipBox.y + clipBox.w / 2, clipBox.w / 2, Math.PI, 0);
-          ctx.lineTo(clipBox.x + clipBox.w, clipBox.y + clipBox.h);
-          ctx.lineTo(clipBox.x, clipBox.y + clipBox.h);
-          ctx.closePath();
-          ctx.clip();
+          ctx.beginPath(); ctx.moveTo(box.x, box.y + box.w / 2); ctx.arc(box.x + box.w / 2, box.y + box.w / 2, box.w / 2, Math.PI, 0);
+          ctx.lineTo(box.x + box.w, box.y + box.h); ctx.lineTo(box.x, box.y + box.h); ctx.closePath(); ctx.clip();
         }
-
-        // 3. Draw main media inside clip box (this is the bright, clear "window")
-        if (isTransitioning) {
-          drawMedia(vPrev, 1, clipBox, settings.blur, true);
-          drawMedia(vCurrent, crossfadeProgress, clipBox, settings.blur, true);
-        } else {
-          drawMedia(vCurrent, 1, clipBox, settings.blur, true);
-        }
-
-        // 4. Apply overlays inside clip box
-        if (settings.overlayDarkness > 0) {
-          ctx.fillStyle = `rgba(0,0,0,${settings.overlayDarkness})`;
-          ctx.fillRect(clipBox.x, clipBox.y, clipBox.w, clipBox.h);
-        }
-        if (settings.vignette) {
-          const vig = getVignette(clipBox.w, clipBox.h);
-          if (vig) ctx.drawImage(vig, clipBox.x, clipBox.y, clipBox.w, clipBox.h);
-        }
+        if (transitioning) { drawMedia(previous, 1, box, settings.blur, true); drawMedia(current, crossfade, box, settings.blur, true); }
+        else drawMedia(current, 1, box, settings.blur, true);
+        if (settings.overlayDarkness > 0) { ctx.fillStyle = `rgba(0,0,0,${settings.overlayDarkness})`; ctx.fillRect(box.x, box.y, box.w, box.h); }
+        if (settings.vignette) { const vig = getVignette(box.w, box.h); if (vig) ctx.drawImage(vig, box.x, box.y, box.w, box.h); }
         if (settings.grain) {
-          const tile = getGrainTile();
-          const pat = tile ? ctx.createPattern(tile, "repeat") : null;
+          const tile = getGrainTile(), pat = tile ? ctx.createPattern(tile, "repeat") : null;
           if (pat) {
-            // Jitter the tile origin each frame so the grain still shimmers.
-            const ox = Math.floor(Math.random() * GRAIN_TILE);
-            const oy = Math.floor(Math.random() * GRAIN_TILE);
-            ctx.save();
-            ctx.translate(-ox, -oy);
-            ctx.fillStyle = pat;
-            ctx.fillRect(clipBox.x + ox, clipBox.y + oy, clipBox.w, clipBox.h);
-            ctx.restore();
+            const ox = Math.floor(Math.random() * GRAIN_TILE), oy = Math.floor(Math.random() * GRAIN_TILE);
+            ctx.save(); ctx.translate(-ox, -oy); ctx.fillStyle = pat; ctx.fillRect(box.x + ox, box.y + oy, box.w, box.h); ctx.restore();
           }
         }
-        
         ctx.restore();
         if (settings.frame === "gold-thin") {
-          ctx.strokeStyle = "#C9A227";
-          ctx.lineWidth = Math.max(2, w * 0.006);
-          const m = w * 0.03;
-          ctx.strokeRect(m, m, w - m * 2, h - m * 2);
+          ctx.strokeStyle = "#C9A227"; ctx.lineWidth = Math.max(2, w * 0.006);
+          const m = w * 0.03; ctx.strokeRect(m, m, w - m * 2, h - m * 2);
         }
-        // Free users must show a watermark, but can still customize text/position.
-        // Pro users can hide it entirely or use a logo.
-        const pro = isProNow();
-        const userWm = settings.watermark;
-        const wm = pro
-          ? userWm
-          : {
-              type: "text" as const,
-              text:
-                userWm.type === "text" && userWm.text.trim()
-                  ? userWm.text
-                  : "QuranReels",
-              position: userWm.position,
-            };
+        const pro = isProNow(), userWm = settings.watermark;
+        const wm = pro ? userWm : { type: "text" as const, text: userWm.type === "text" && userWm.text.trim() ? userWm.text : "QuranReels", position: userWm.position };
         if (wm.type !== "none") {
           const label = wm.type === "logo" ? "QuranReels" : wm.text || "";
           if (label) {
-            ctx.font = `${Math.round(w * 0.022)}px Inter, sans-serif`;
-            ctx.fillStyle = pro ? "rgba(245,241,232,0.6)" : "rgba(245,241,232,0.85)";
-            ctx.textAlign = "left";
+            ctx.font = `${Math.round(w * 0.022)}px Inter, sans-serif`; ctx.fillStyle = pro ? "rgba(245,241,232,0.6)" : "rgba(245,241,232,0.85)"; ctx.textAlign = "left";
             const pad = w * 0.04;
-            const tx =
-              wm.position === "tl" || wm.position === "bl"
-                ? pad
-                : w - pad - ctx.measureText(label).width;
-            const ty =
-              wm.position === "tl" || wm.position === "tr" ? pad + 20 : h - pad;
-            ctx.fillText(label, tx, ty);
+            const x = wm.position === "tl" || wm.position === "bl" ? pad : w - pad - ctx.measureText(label).width;
+            const y = wm.position === "tl" || wm.position === "tr" ? pad + 20 : h - pad;
+            ctx.fillText(label, x, y);
           }
         }
-        drawText(ctx, settings, verses, segments, textAlpha, segIdx, w, h);
-      },
-      [settings, verses, segments],
-    );
+        drawText(ctx, settings, verses, segments, alpha, segIdx, w, h);
+        lastSigRef.current = sig; // Only successful compositions may be cached.
+      } catch (error) {
+        lastSigRef.current = "";
+        if (exporting) throw new MediaExportError(`Could not draw the background frame: ${error instanceof Error ? error.message : "unknown error"}`);
+      }
+    }, [settings, verses, segments]);
 
-    // rAF render loop — time derived from AudioContext for perfect sync
     useEffect(() => {
-      let wasExporting = false;
       const loop = () => {
-        // Stand down while an export drives the canvas: this pass would
-        // otherwise composite a whole extra frame per tick and its signature
-        // would defeat the frame-skip cache for every exported frame.
-        if (isExportingNow()) {
-          wasExporting = true;
-          rafRef.current = requestAnimationFrame(loop);
-          return;
-        }
-        if (wasExporting) {
-          wasExporting = false;
-          lastSigRef.current = "";
-        }
-        let t = localTimeRef.current;
-        let idx = currentSegIdxRef.current;
-        
-        if (playing && reciterAudioRef.current && segments.length) {
-          const first = segments[0];
-          const last = segments[segments.length - 1];
-          const cTime = reciterAudioRef.current.currentTime;
-          
-          t = cTime - first.absoluteStart;
-
-          const reciterGain = getReciterGain();
-          if (cTime >= last.absoluteEnd) {
-             const overage = (cTime - last.absoluteEnd);
-             reciterGain.gain.value = Math.max(0, 1.0 - (overage / 0.8));
-          } else {
-             reciterGain.gain.value = 1;
+        if (!exportRef.current) {
+          let t = localTimeRef.current, idx = currentSegIdxRef.current;
+          if (playing && reciterAudioRef.current && segments.length) {
+            const first = segments[0], last = segments[segments.length - 1], cTime = reciterAudioRef.current.currentTime;
+            t = cTime - first.absoluteStart;
+            const gain = getReciterGain();
+            gain.gain.value = cTime >= last.absoluteEnd ? Math.max(0, 1 - (cTime - last.absoluteEnd) / 0.8) : 1;
+            if (t >= duration) { pause(); t = duration; gain.gain.value = 1; }
+            idx = segments.findIndex(sg => cTime >= sg.absoluteStart && cTime < sg.absoluteEnd);
+            if (idx === -1) idx = cTime >= last.absoluteEnd ? segments.length - 1 : 0;
           }
-
-          // Stop if reached the end of the total video duration (including padding)
-          if (t >= duration) {
-            reciterAudioRef.current.pause();
-            ambientRef.current?.pause();
-            setPlaying(false);
-            t = duration;
-            reciterGain.gain.value = 1;
-          }
-
-          // Find current segment index based on absolute time
-          idx = segments.findIndex(sg => cTime >= sg.absoluteStart && cTime < sg.absoluteEnd);
-          if (idx === -1) {
-            // fallback if drifting
-            idx = cTime >= last.absoluteEnd ? segments.length - 1 : 0;
-          }
+          currentSegIdxRef.current = idx; localTimeRef.current = t;
+          draw(t, idx); onProgress?.(t, duration);
         }
-        
-        currentSegIdxRef.current = idx;
-        localTimeRef.current = t;
-        draw(t, idx);
-        onProgress?.(t, duration);
         rafRef.current = requestAnimationFrame(loop);
       };
       rafRef.current = requestAnimationFrame(loop);
-      return () => {
-        if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      };
-    }, [draw, playing, duration, onProgress, segments, settings.audioSpeed]);
+      return () => { if (rafRef.current !== null) cancelAnimationFrame(rafRef.current); };
+    }, [draw, playing, duration, onProgress, segments, pause]);
 
-    useImperativeHandle(
-      ref,
-      () => ({
-        play: async () => {
-          if (!segments.length) return;
-          const ctx = getAudioCtx();
-          if (ctx.state === "suspended") await ctx.resume();
+    const drawFrame = useCallback(async (t: number, exporting?: boolean) => {
+      if (!exporting && exportRef.current) return;
+      const clamped = Math.max(0, Math.min(t, duration));
+      let idx = segments.findIndex(sg => clamped >= sg.start && clamped < sg.start + sg.duration);
+      if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
+      if (exporting) {
+        const lease = exportRef.current;
+        if (!lease) throw new MediaExportError("Start an export session before rendering frames.");
+        const keys = [segments[idx]?.verse_key.split(":")[1] || "global"];
+        if (settings.bgMode === "per-ayah" && idx > 0 && clamped - segments[idx].start < 1) keys.push(segments[idx - 1].verse_key.split(":")[1]);
+        await lease.media.seek(clamped, keys, lease.controller.signal);
+        throwIfAborted(lease.controller.signal);
+        if (exportRef.current !== lease || mediaRef.current !== lease.media) throw new MediaExportError("Background changed during export.");
+      }
+      draw(clamped, idx, !!exporting);
+    }, [draw, duration, segments, settings.bgMode]);
 
-          if (ambientRef.current) connectAmbientToCtx(ambientRef.current);
-          if (reciterAudioRef.current) {
-            connectReciterToCtx(reciterAudioRef.current);
-            reciterAudioRef.current.playbackRate = settings.audioSpeed;
-          }
-
-          // An export parks the background clip and hands drawing over to the
-          // decoder; live playback needs the element running again.
-          Object.values(bgMediaRef.current).forEach((m) => {
-            if (m instanceof HTMLVideoElement) {
-              releaseBgFrame(m);
-              if (m.paused) m.play().catch(() => {});
-            }
-          });
-          lastSigRef.current = "";
-
-          // Schedule audio fade-out for preview
-          const masterGain = getMasterGain();
-          const realDuration = duration / settings.audioSpeed;
-          masterGain.gain.cancelScheduledValues(ctx.currentTime);
-          masterGain.gain.setValueAtTime(1, ctx.currentTime);
-          if (realDuration > 1.0) {
-            masterGain.gain.setValueAtTime(1, ctx.currentTime + realDuration - 1.0);
-            masterGain.gain.linearRampToValueAtTime(0, ctx.currentTime + realDuration);
-          }
-
-          const first = segments[0];
-          let resumeTime = first.absoluteStart;
-          
-          const t = localTimeRef.current;
-          const resuming = t > 0.05 && t < duration - 0.05;
-          if (resuming) {
-            resumeTime = first.absoluteStart + t;
-          } else {
-            localTimeRef.current = 0;
-            currentSegIdxRef.current = 0;
-          }
-
-          if (reciterAudioRef.current) {
-            reciterAudioRef.current.currentTime = resumeTime;
-            reciterAudioRef.current.play().catch(e => console.warn("reciter play error", e));
-          }
-          ambientRef.current?.play().catch(() => {});
-          setPlaying(true);
-        },
-        pause: () => {
-          if (rafRef.current) {
-            cancelAnimationFrame(rafRef.current);
-            rafRef.current = 0;
-          }
-          reciterAudioRef.current?.pause();
-          ambientRef.current?.pause();
-          const masterGain = getMasterGain();
-          masterGain.gain.cancelScheduledValues(getAudioCtx().currentTime);
-          masterGain.gain.value = 1;
-          setPlaying(false);
-        },
-        seek: (t) => {
-          const clamped = Math.max(0, Math.min(t, duration));
-          if (!segments.length) {
-            localTimeRef.current = clamped;
-            return;
-          }
-          
-          localTimeRef.current = clamped;
-          const targetAbsTime = segments[0].absoluteStart + clamped;
-          
-          if (reciterAudioRef.current) {
-            reciterAudioRef.current.currentTime = targetAbsTime;
-          }
-
-          let idx = segments.findIndex(sg => targetAbsTime >= sg.absoluteStart && targetAbsTime < sg.absoluteEnd);
-          if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
-          currentSegIdxRef.current = idx;
-        },
-        getDuration: () => duration / settings.audioSpeed,
-        getCanvas: () => canvasRef.current,
-        getAudioElement: () => ambientRef.current,
-        getAudioElements: () => [reciterAudioRef.current, ambientRef.current].filter(Boolean) as HTMLAudioElement[],
-        getAudioContext: () => getAudioCtx(),
-        getAudioDestination: () => getAudioDest(),
-        getMasterGain: () => getMasterGain(),
-        getReciterGain: () => getReciterGain(),
-        getSegmentTimings: () => segments,
-        getCurrentTime: () => localTimeRef.current,
-        muteSpeakers: (muted: boolean) => setSpeakerMuted(muted),
-        drawFrame: async (t: number, isExporting?: boolean) => {
-          if (isExporting) markExportFrame();
-          const clamped = Math.max(0, Math.min(t, duration));
-          const targetAbsTime = segments[0]?.start + clamped; // use start instead of absoluteStart which doesn't exist on PreviewHandle type
-          let idx = segments.findIndex(sg => targetAbsTime >= sg.start && targetAbsTime < (sg.start + sg.duration));
-          if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
-          
-          const currentAyah = segments[idx]?.verse_key?.split(":")[1] || "global";
-          let activeBg = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
-          
-          if (activeBg instanceof HTMLVideoElement) {
-            const v = activeBg;
-            if (isExporting) {
-              v.pause(); // Crucial to prevent decoder artifacts
-              const target = loopedTime(v, clamped);
-              // Decode forward -- a few milliseconds -- and only seek when the
-              // accelerated path is unavailable for this clip.
-              if (!(await decodeBgFrame(v, target))) {
-                releaseBgFrame(v);
-                await seekVideoFrame(v, target);
-              }
-            } else {
-              releaseBgFrame(v);
-              if (v.paused) v.play().catch(() => {});
-            }
-          }
-          draw(clamped, idx);
-        },
-        captureThumbnail: async () => {
-          if (!segments.length) return null;
-          const thumbTime = Math.min(0.5, duration / 2);
-          const clamped = Math.max(0, Math.min(thumbTime, duration));
-          const targetAbsTime = segments[0]?.absoluteStart + clamped;
-          let idx = segments.findIndex(sg => targetAbsTime >= sg.absoluteStart && targetAbsTime < sg.absoluteEnd);
-          if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
-          
-          const currentAyah = segments[idx]?.verse_key?.split(":")[1] || "global";
-          let activeBg = bgMediaRef.current[currentAyah] || bgMediaRef.current["global"];
-
-          if (activeBg instanceof HTMLVideoElement) {
-            // Never reuse a frame an export left behind for the thumbnail.
-            releaseBgFrame(activeBg);
-            await seekVideoFrame(activeBg, loopedTime(activeBg, clamped));
-          }
-          draw(clamped, idx);
-          
-          const canvas = canvasRef.current;
-          if (!canvas) return null;
-          return canvas.toDataURL("image/jpeg", 0.9);
+    useImperativeHandle(ref, () => ({
+      play: async () => {
+        if (!segments.length || exportRef.current) return;
+        const ctx = getAudioCtx(); if (ctx.state === "suspended") await ctx.resume();
+        if (ambientRef.current) connectAmbientToCtx(ambientRef.current);
+        if (reciterAudioRef.current) { connectReciterToCtx(reciterAudioRef.current); reciterAudioRef.current.playbackRate = settings.audioSpeed; }
+        mediaRef.current?.play(); lastSigRef.current = "";
+        const gain = getMasterGain(), realDuration = duration / settings.audioSpeed;
+        gain.gain.cancelScheduledValues(ctx.currentTime); gain.gain.setValueAtTime(1, ctx.currentTime);
+        if (realDuration > 1) { gain.gain.setValueAtTime(1, ctx.currentTime + realDuration - 1); gain.gain.linearRampToValueAtTime(0, ctx.currentTime + realDuration); }
+        const t = localTimeRef.current, resuming = t > 0.05 && t < duration - 0.05;
+        if (!resuming) { localTimeRef.current = 0; currentSegIdxRef.current = 0; }
+        if (reciterAudioRef.current) {
+          reciterAudioRef.current.currentTime = segments[0].absoluteStart + (resuming ? t : 0);
+          reciterAudioRef.current.play().catch(e => console.warn("reciter play error", e));
         }
-      }),
-      [segments, duration, settings.audioSpeed, playing, draw],
-    );
+        ambientRef.current?.play().catch(() => {}); setPlaying(true);
+      },
+      pause,
+      seek: t => {
+        if (exportRef.current) return;
+        const clamped = Math.max(0, Math.min(t, duration)); localTimeRef.current = clamped;
+        if (!segments.length) return;
+        const abs = segments[0].absoluteStart + clamped;
+        if (reciterAudioRef.current) reciterAudioRef.current.currentTime = abs;
+        let idx = segments.findIndex(sg => abs >= sg.absoluteStart && abs < sg.absoluteEnd);
+        if (idx === -1) idx = clamped <= 0 ? 0 : segments.length - 1;
+        currentSegIdxRef.current = idx;
+      },
+      getDuration: () => duration / settings.audioSpeed,
+      getCanvas: () => canvasRef.current,
+      getAudioElement: () => ambientRef.current,
+      getAudioElements: () => [reciterAudioRef.current, ambientRef.current].filter(Boolean) as HTMLAudioElement[],
+      getAudioContext: getAudioCtx, getAudioDestination: getAudioDest, getMasterGain, getReciterGain,
+      getSegmentTimings: () => segments, getCurrentTime: () => localTimeRef.current,
+      muteSpeakers: setSpeakerMuted, beginExport, endExport, drawFrame,
+      captureThumbnail: async () => {
+        if (!segments.length || exportRef.current) return null;
+        let ownsCanvas = false;
+        try {
+          await beginExport();
+          ownsCanvas = true;
+          await drawFrame(Math.min(0.5, duration / 2), true);
+          return canvasRef.current?.toDataURL("image/jpeg", 0.9) ?? null;
+        } catch { return null; }
+        finally { if (ownsCanvas) endExport(); }
+      },
+    }), [segments, duration, settings.audioSpeed, pause, beginExport, endExport, drawFrame]);
 
     const { w, h } = getDims(settings);
     return (
-      <div
-        className="relative mx-auto flex h-full max-h-[40vh] items-center justify-center lg:max-h-[70vh]"
-        style={{ aspectRatio: `${w} / ${h}` }}
-      >
-        <canvas
-          ref={canvasRef}
-          className="h-full w-full rounded-xl bg-black shadow-2xl"
-          aria-label="Video preview"
-        />
+      <div className="relative mx-auto flex h-full max-h-[40vh] items-center justify-center lg:max-h-[70vh]" style={{ aspectRatio: `${w} / ${h}` }}>
+        <canvas ref={canvasRef} className="h-full w-full rounded-xl bg-black shadow-2xl" aria-label="Video preview" />
         <audio ref={reciterAudioRef} crossOrigin="anonymous" preload="auto" />
         <audio ref={ambientRef} crossOrigin="anonymous" preload="auto" loop />
-        {!ready && (
-          <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/60 text-sm text-muted-foreground">
-            Loading recitation…
-          </div>
-        )}
-        {ready && segments.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/60 p-4 text-center text-sm text-muted-foreground">
-            No audio available for this selection — try another reciter.
-          </div>
-        )}
+        {(!ready || !verses.length || backgroundState.loading) && <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/60 text-sm text-muted-foreground">{!ready || !verses.length ? "Loading recitation…" : "Preparing background video…"}</div>}
+        {backgroundState.error && <div role="alert" className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-xl bg-black/80 p-4 text-center text-sm text-white"><p>{backgroundState.error}</p><button type="button" className="rounded border px-3 py-2" onClick={() => setReloadBackground(n => n + 1)}>Retry background</button></div>}
+        {ready && segments.length === 0 && <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/60 p-4 text-center text-sm text-muted-foreground">No audio available for this selection — try another reciter.</div>}
       </div>
     );
   },
 );
 
-function drawGeneratedBg(
-  ctx: CanvasRenderingContext2D,
-  g: GeneratedTheme,
-  w: number,
-  h: number,
-  t: number,
-) {
+function drawGeneratedBg(ctx: CanvasRenderingContext2D, g: GeneratedTheme, w: number, h: number, t: number) {
   switch (g.type) {
-    case "solid": {
-      ctx.fillStyle = g.color;
-      ctx.fillRect(0, 0, w, h);
-      break;
-    }
-    case "gradient": {
-      const gr = ctx.createLinearGradient(0, 0, w, h);
-      gr.addColorStop(0, g.from);
-      gr.addColorStop(1, g.to);
-      ctx.fillStyle = gr;
-      ctx.fillRect(0, 0, w, h);
-      break;
-    }
+    case "solid": ctx.fillStyle = g.color; ctx.fillRect(0, 0, w, h); break;
+    case "gradient": { const gr = ctx.createLinearGradient(0, 0, w, h); gr.addColorStop(0, g.from); gr.addColorStop(1, g.to); ctx.fillStyle = gr; ctx.fillRect(0, 0, w, h); break; }
     case "particles": {
-      ctx.fillStyle = g.bg;
-      ctx.fillRect(0, 0, w, h);
-      for (let i = 0; i < 70; i++) {
-        const x = (i * 137 + t * 20) % w;
-        const y = (i * 91 + t * 10) % h;
-        const r = (g.size ?? 1) + (i % 4);
-        ctx.globalAlpha = 0.25 + (i % 5) * 0.1;
-        ctx.fillStyle = g.color;
-        ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.globalAlpha = 1;
-      break;
+      ctx.fillStyle = g.bg; ctx.fillRect(0, 0, w, h);
+      for (let i = 0; i < 70; i++) { ctx.globalAlpha = 0.25 + (i % 5) * 0.1; ctx.fillStyle = g.color; ctx.beginPath(); ctx.arc((i * 137 + t * 20) % w, (i * 91 + t * 10) % h, (g.size ?? 1) + (i % 4), 0, Math.PI * 2); ctx.fill(); }
+      ctx.globalAlpha = 1; break;
     }
     case "bokeh": {
-      ctx.fillStyle = g.bg;
-      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = g.bg; ctx.fillRect(0, 0, w, h);
       for (let i = 0; i < 18; i++) {
-        const x = (i * 251 + t * 12) % (w + 200) - 100;
-        const y = (i * 173 + t * 6) % h;
-        const r = w * (0.03 + (i % 5) * 0.015);
-        const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
-        grad.addColorStop(0, `${g.color}55`);
-        grad.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
-        ctx.fill();
+        const x = (i * 251 + t * 12) % (w + 200) - 100, y = (i * 173 + t * 6) % h, r = w * (0.03 + (i % 5) * 0.015);
+        const grad = ctx.createRadialGradient(x, y, 0, x, y, r); grad.addColorStop(0, `${g.color}55`); grad.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
       }
       break;
     }
     case "pattern": {
-      ctx.fillStyle = g.bg;
-      ctx.fillRect(0, 0, w, h);
-      const cs = w / 6;
-      ctx.strokeStyle = g.fg;
-      ctx.lineWidth = Math.max(1, w * 0.0015);
-      ctx.globalAlpha = 0.18;
-      for (let ry = -1; ry <= Math.ceil(h / cs); ry++) {
-        for (let cx = -1; cx <= 6; cx++) {
-          const px = cx * cs + cs / 2;
-          const py = ry * cs + cs / 2;
-          ctx.save();
-          ctx.translate(px, py);
-          ctx.strokeRect(-cs * 0.32, -cs * 0.32, cs * 0.64, cs * 0.64);
-          ctx.rotate(Math.PI / 4);
-          ctx.strokeRect(-cs * 0.32, -cs * 0.32, cs * 0.64, cs * 0.64);
-          ctx.restore();
-        }
+      ctx.fillStyle = g.bg; ctx.fillRect(0, 0, w, h); const cs = w / 6;
+      ctx.strokeStyle = g.fg; ctx.lineWidth = Math.max(1, w * 0.0015); ctx.globalAlpha = 0.18;
+      for (let ry = -1; ry <= Math.ceil(h / cs); ry++) for (let cx = -1; cx <= 6; cx++) {
+        ctx.save(); ctx.translate(cx * cs + cs / 2, ry * cs + cs / 2); ctx.strokeRect(-cs * 0.32, -cs * 0.32, cs * 0.64, cs * 0.64); ctx.rotate(Math.PI / 4); ctx.strokeRect(-cs * 0.32, -cs * 0.32, cs * 0.64, cs * 0.64); ctx.restore();
       }
-      ctx.globalAlpha = 1;
-      break;
+      ctx.globalAlpha = 1; break;
     }
   }
 }
-
-/** Fade in at the start of a verse and out at its end. */
-function textAlphaFor(
-  seg: Segment | undefined,
-  t: number,
-  animationSpeed: number,
-): number {
+function textAlphaFor(seg: Segment | undefined, t: number, animationSpeed: number): number {
   if (!seg) return 1;
-  const inSeg = Math.max(0, t - seg.start);
-  const speed = 0.4 / animationSpeed;
+  const inSeg = Math.max(0, t - seg.start), speed = 0.4 / animationSpeed;
   let alpha = Math.min(1, inSeg / speed);
-  if (seg.duration - inSeg < speed) {
-    // fade completely out during padding
-    alpha = Math.max(0, (seg.duration - inSeg) / speed);
-  }
+  if (seg.duration - inSeg < speed) alpha = Math.max(0, (seg.duration - inSeg) / speed);
   return alpha;
 }
-
-function drawText(
-  ctx: CanvasRenderingContext2D,
-  s: ProjectSettings,
-  verses: Verse[],
-  segments: Segment[],
-  alpha: number,
-  segIdx: number,
-  w: number,
-  h: number,
-) {
+function drawText(ctx: CanvasRenderingContext2D, s: ProjectSettings, verses: Verse[], segments: Segment[], alpha: number, segIdx: number, w: number, h: number) {
   if (alpha <= 0) return;
-
-  const selected = verses.filter(
-    (v) => v.verse_number >= s.fromAyah && v.verse_number <= s.toAyah,
-  );
+  const selected = verses.filter(v => v.verse_number >= s.fromAyah && v.verse_number <= s.toAyah);
   if (!selected.length) return;
-
-  const seg = segments.length
-    ? segments[Math.min(segIdx, segments.length - 1)]
-    : undefined;
-  const currentVerse =
-    (seg && selected.find((v) => v.verse_key === seg.verse_key)) ?? selected[0];
-
-  const layer = getTextLayer(s, currentVerse, w, h);
-  if (!layer) return;
-
-  ctx.globalAlpha = alpha;
-  ctx.drawImage(layer, 0, 0);
-  ctx.globalAlpha = 1;
+  const seg = segments.length ? segments[Math.min(segIdx, segments.length - 1)] : undefined;
+  const verse = (seg && selected.find(v => v.verse_key === seg.verse_key)) ?? selected[0];
+  const layer = getTextLayer(s, verse, w, h); if (!layer) return;
+  ctx.globalAlpha = alpha; ctx.drawImage(layer, 0, 0); ctx.globalAlpha = 1;
 }
-
-/**
- * Text is identical for every frame of a verse, so paint it once into an
- * offscreen layer and reuse it. Only the fade alpha varies per frame, and
- * that is applied at blit time by the caller.
- */
-function getTextLayer(
-  s: ProjectSettings,
-  verse: Verse,
-  w: number,
-  h: number,
-): HTMLCanvasElement | null {
-  const translation =
-    verse.translations?.[0]?.text?.replace(/<[^>]*>/g, "") ?? "";
-
-  const key = [
-    verse.verse_key,
-    w,
-    h,
-    s.layout,
-    s.platformStyle,
-    s.maxWidthPct,
-    s.textPanX || 0,
-    s.textPanY || 0,
-    s.textZoom || 1,
-    s.textColor,
-    s.textShadow ? 1 : 0,
-    s.arabicFont,
-    s.arabicSize,
-    s.lineHeight,
-    s.showAyahNumber ? 1 : 0,
-    s.ayahNumberStyle,
-    s.translationId,
-    translation.length,
-  ].join("|");
-
-  const cached = _textLayers.get(key);
-  if (cached) return cached;
-
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const lctx = canvas.getContext("2d");
-  if (!lctx) return null;
-  paintTextLayer(lctx, s, verse, translation, w, h);
-
-  // Each layer is a full-resolution RGBA canvas, so keep only a handful.
-  if (_textLayers.size >= TEXT_LAYER_CACHE_MAX) {
-    const oldest = _textLayers.keys().next();
-    if (!oldest.done) _textLayers.delete(oldest.value);
-  }
-  _textLayers.set(key, canvas);
-  return canvas;
+function getTextLayer(s: ProjectSettings, verse: Verse, w: number, h: number): HTMLCanvasElement | null {
+  const translation = verse.translations?.[0]?.text?.replace(/<[^>]*>/g, "") ?? "";
+  const key = [verse.verse_key, verse.text_uthmani, w, h, s.layout, s.platformStyle, s.maxWidthPct, s.textPanX || 0, s.textPanY || 0, s.textZoom || 1, s.textColor, s.textShadow, s.arabicFont, s.arabicSize, s.lineHeight, s.showAyahNumber, s.ayahNumberStyle, s.translationId, translation].join("|");
+  const cached = _textLayers.get(key); if (cached) return cached;
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const g = c.getContext("2d"); if (!g) return null;
+  paintTextLayer(g, s, verse, translation, w, h);
+  if (_textLayers.size >= TEXT_LAYER_CACHE_MAX) { const oldest = _textLayers.keys().next(); if (!oldest.done) _textLayers.delete(oldest.value); }
+  _textLayers.set(key, c); return c;
 }
-
-function paintTextLayer(
-  ctx: CanvasRenderingContext2D,
-  s: ProjectSettings,
-  currentVerse: Verse,
-  translation: string,
-  w: number,
-  h: number,
-) {
-  let arabic = currentVerse.text_uthmani;
-
+function paintTextLayer(ctx: CanvasRenderingContext2D, s: ProjectSettings, verse: Verse, translation: string, w: number, h: number) {
+  let arabic = verse.text_uthmani;
   if (s.showAyahNumber) {
-    const num = currentVerse.verse_number.toString().replace(/[0-9]/g, (w) => "٠١٢٣٤٥٦٧٨٩"[+w]);
-    if (s.ayahNumberStyle === "ornate") {
-      // Use the Arabic ornate bracket (U+06DD) followed by the digits
-      arabic = `${arabic} \u06DD${num}`;
-    } else if (s.ayahNumberStyle === "bracket") {
-      arabic = `${arabic} ﴾${num}﴿`;
-    } else {
-      arabic = `${arabic} ${num}`;
-    }
+    const num = verse.verse_number.toString().replace(/[0-9]/g, n => "٠١٢٣٤٥٦٧٨٩"[+n]);
+    arabic = s.ayahNumberStyle === "ornate" ? `${arabic} \u06DD${num}` : s.ayahNumberStyle === "bracket" ? `${arabic} ﴾${num}﴿` : `${arabic} ${num}`;
   }
-
-  let maxW = w * (s.maxWidthPct / 100);
-  const centerX = w / 2 + ((s.textPanX || 0) / 100) * w;
+  let maxW = w * s.maxWidthPct / 100;
+  const centerX = w / 2 + (s.textPanX || 0) / 100 * w;
   let baseY = h / 2;
   if (s.layout === "bottom-third") {
     baseY = h * 0.72;
-    if (s.platformStyle === "tiktok" || s.platformStyle === "instagram") {
-      baseY = h * 0.8;
-      maxW = Math.min(maxW, w * 0.75); // Leave right side free for icons
-    } else if (s.platformStyle === "youtube") {
-      baseY = h * 0.76;
-    }
-  } else if (s.layout === "split") {
-    baseY = h * 0.35;
-  }
-  baseY += ((s.textPanY || 0) / 100) * h;
-
-  const arabicFont = ARABIC_FONTS.find((f) => f.id === s.arabicFont)?.css ?? "'Amiri', serif";
-  const sizeScale = w / 1080;
-
-  ctx.save();
-  const textZoom = s.textZoom || 1;
-  if (textZoom !== 1) {
-    ctx.translate(centerX, baseY);
-    ctx.scale(textZoom, textZoom);
-    ctx.translate(-centerX, -baseY);
-  }
-
-  ctx.textAlign = "center";
-  ctx.fillStyle = s.textColor;
-  if (s.textShadow) {
-    ctx.shadowColor = "rgba(0,0,0,0.85)";
-    ctx.shadowBlur = 12 * sizeScale;
-    ctx.shadowOffsetY = 2;
-  }
-
-  // Shrink-to-fit search. This now runs once per verse rather than per frame.
-  let arSize = s.arabicSize * sizeScale;
-  const minSize = s.arabicSize * sizeScale * 0.35;
-  let arLines: string[] = [];
-  let arLineH = 0;
+    if (s.platformStyle === "tiktok" || s.platformStyle === "instagram") { baseY = h * 0.8; maxW = Math.min(maxW, w * 0.75); }
+    else if (s.platformStyle === "youtube") baseY = h * 0.76;
+  } else if (s.layout === "split") baseY = h * 0.35;
+  baseY += (s.textPanY || 0) / 100 * h;
+  const font = ARABIC_FONTS.find(f => f.id === s.arabicFont)?.css ?? "'Amiri', serif", scale = w / 1080;
+  ctx.save(); const zoom = s.textZoom || 1;
+  if (zoom !== 1) { ctx.translate(centerX, baseY); ctx.scale(zoom, zoom); ctx.translate(-centerX, -baseY); }
+  ctx.textAlign = "center"; ctx.fillStyle = s.textColor;
+  if (s.textShadow) { ctx.shadowColor = "rgba(0,0,0,0.85)"; ctx.shadowBlur = 12 * scale; ctx.shadowOffsetY = 2; }
+  let arSize = s.arabicSize * scale;
+  const minSize = arSize * 0.35;
+  let lines: string[] = [], lineH = 0;
   for (;;) {
-    ctx.font = `700 ${arSize}px ${arabicFont}`;
-    arLines = wrapText(ctx, arabic, maxW);
-    arLineH = arSize * s.lineHeight;
-    const lineOK = arLines.length <= 4 || arSize <= minSize;
-    const heightOK = arLines.length * arLineH <= h * 0.55 || arSize <= 14;
-    if (lineOK && heightOK) break;
+    ctx.font = `700 ${arSize}px ${font}`; lines = wrapText(ctx, arabic, maxW); lineH = arSize * s.lineHeight;
+    if ((lines.length <= 4 || arSize <= minSize) && (lines.length * lineH <= h * 0.55 || arSize <= 14)) break;
     arSize *= 0.92;
   }
-
-  const arTotalH = arLines.length * arLineH;
-  let y = baseY - arTotalH / 2;
-  arLines.forEach((line) => {
-    ctx.fillText(line, centerX, y);
-    y += arLineH;
-  });
-
+  let y = baseY - lines.length * lineH / 2;
+  for (const line of lines) { ctx.fillText(line, centerX, y); y += lineH; }
   if (s.layout !== "arabic-only" && translation && s.translationId) {
-    ctx.shadowBlur = 8 * sizeScale;
-    const trSize = Math.max(arSize * 0.42, 14);
-    ctx.font = `500 ${trSize}px Inter, sans-serif`;
-    ctx.fillStyle = s.textColor;
-    const trY = s.layout === "split" ? h * 0.7 : y + arLineH * 0.4;
-    const trLines = wrapText(ctx, translation, maxW);
-    const trLineH = trSize * 1.4;
-    let ty = trY;
-    trLines.forEach((line) => {
-      ctx.fillText(line, centerX, ty);
-      ty += trLineH;
-    });
+    ctx.shadowBlur = 8 * scale; const trSize = Math.max(arSize * 0.42, 14);
+    ctx.font = `500 ${trSize}px Inter, sans-serif`; ctx.fillStyle = s.textColor;
+    let ty = s.layout === "split" ? h * 0.7 : y + lineH * 0.4;
+    for (const line of wrapText(ctx, translation, maxW)) { ctx.fillText(line, centerX, ty); ty += trSize * 1.4; }
   }
-
-  ctx.font = `600 ${Math.max(arSize * 0.28, 14)}px Inter, sans-serif`;
-  ctx.fillStyle = "#C9A227";
-  const refKey = currentVerse.verse_key ?? "";
-  if (refKey) ctx.fillText(`— ${refKey} —`, centerX, h * 0.88);
-
-  ctx.shadowBlur = 0;
-  ctx.restore();
+  ctx.font = `600 ${Math.max(arSize * 0.28, 14)}px Inter, sans-serif`; ctx.fillStyle = "#C9A227";
+  if (verse.verse_key) ctx.fillText(`— ${verse.verse_key} —`, centerX, h * 0.88);
+  ctx.shadowBlur = 0; ctx.restore();
 }
-
 function wrapText(ctx: CanvasRenderingContext2D, text: string, maxW: number): string[] {
-  const words = text.split(/\s+/);
-  const lines: string[] = [];
-  let line = "";
-  for (const w of words) {
-    const test = line ? line + " " + w : w;
-    if (ctx.measureText(test).width > maxW && line) {
-      lines.push(line);
-      line = w;
-    } else {
-      line = test;
-    }
+  const lines: string[] = []; let line = "";
+  for (const word of text.split(/\s+/)) {
+    const test = line ? line + " " + word : word;
+    if (ctx.measureText(test).width > maxW && line) { lines.push(line); line = word; } else line = test;
   }
-  if (line) lines.push(line);
-  return lines;
+  if (line) lines.push(line); return lines;
 }
-
 export { getDims };

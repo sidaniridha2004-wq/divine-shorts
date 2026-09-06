@@ -38,19 +38,21 @@ async function drawExportFrame(preview: PreviewHandle, time: number, signal?: Ab
     throwIfAborted(signal);
   } catch (error) {
     throwIfAborted(signal);
-    // A pending draw cannot be cancelled by Promise.race. Do not start a second
-    // recorder against the same canvas when a frame fails or times out.
+    // Do not start another recorder on a canvas whose frame failed.
     throw new MediaExportError(error instanceof Error ? error.message : "Could not render a frame.");
   }
 }
 
 export async function exportVideo(preview: PreviewHandle, onProgress: (p: ExportProgress) => void, settings: ProjectSettings, signal?: AbortSignal): Promise<ExportResult> {
   throwIfAborted(signal);
-  preview.pause();
   const duration = preview.getDuration();
   if (!Number.isFinite(duration) || duration <= 0 || !preview.getSegmentTimings().length) throw new MediaExportError("Wait for the recitation to finish loading before exporting.");
   if (duration > 600) throw new MediaExportError("Select a shorter range (up to 10 minutes) to avoid running out of memory.");
+  let ownsCanvas = false;
   try {
+    onProgress({ phase: "preparing", progress: 0, message: "Preparing background video…" });
+    await preview.beginExport(signal);
+    ownsCanvas = true;
     if (isWebCodecsExportSupported()) {
       try { return await encode(preview, onProgress, settings, signal); }
       catch (error) {
@@ -63,7 +65,13 @@ export async function exportVideo(preview: PreviewHandle, onProgress: (p: Export
     onProgress({ phase: "preparing", progress: 0, message: "Using compatibility mode. Keep this tab visible…" });
     const { exportVideo: record } = await import("./mediarecorder-export");
     return await record(preview, onProgress, settings, signal);
-  } finally { preview.pause(); preview.muteSpeakers(false); }
+  } finally {
+    if (ownsCanvas) {
+      preview.endExport();
+      preview.pause();
+      preview.muteSpeakers(false);
+    }
+  }
 }
 
 async function encode(preview: PreviewHandle, onProgress: (p: ExportProgress) => void, settings: ProjectSettings, signal?: AbortSignal): Promise<ExportResult> {

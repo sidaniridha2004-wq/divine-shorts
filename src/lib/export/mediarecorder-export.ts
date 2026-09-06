@@ -1,15 +1,9 @@
-// MediaRecorder-based export. Captures the canvas stream and merges it with
-// the AudioContext's MediaStreamDestination from PreviewCanvas.
-// This approach is clean: the preview already routes all audio (recitation +
-// ambient) through a single AudioContext → MediaStreamDestination, so we just
-// grab that stream and combine it with the canvas video stream.
 import type { PreviewHandle } from "@/components/wizard/PreviewCanvas";
-
-export type ExportProgress = {
-  phase: "preparing" | "recording" | "encoding" | "done";
-  progress: number; // 0..1
-  message?: string;
-};
+import type { ProjectSettings } from "@/lib/project-state";
+import type { ExportProgress, ExportResult } from "./webcodecs-export";
+import { renderExportAudio } from "./audio-mix";
+import { bounded, throwIfAborted } from "./runtime";
+export type { ExportProgress } from "./webcodecs-export";
 
 const MIME_CANDIDATES = [
   { mime: "video/mp4;codecs=avc1,mp4a.40.2", ext: "mp4" },
@@ -18,78 +12,89 @@ const MIME_CANDIDATES = [
   { mime: "video/webm", ext: "webm" },
 ];
 
-export async function exportVideo(
-  preview: PreviewHandle,
-  onProgress: (p: ExportProgress) => void,
-): Promise<{ blob: Blob; ext: string; mime: string }> {
+/** Real-time fallback with its own audio clock and explicitly requested frames. */
+export async function exportVideo(preview: PreviewHandle, onProgress: (p: ExportProgress) => void, settings: ProjectSettings, signal?: AbortSignal): Promise<ExportResult> {
+  throwIfAborted(signal);
+  if (typeof MediaRecorder === "undefined") throw new Error("This browser does not support video export.");
+  const chosen = MIME_CANDIDATES.find(item => MediaRecorder.isTypeSupported(item.mime));
+  if (!chosen) throw new Error("No supported recording codec. Try the latest Chrome or Edge.");
+  const duration = preview.getDuration();
   const canvas = preview.getCanvas();
-  const segments = preview.getSegmentTimings();
-  if (!canvas || !segments.length)
-    throw new Error("Preview not ready");
-
-  onProgress({ phase: "preparing", progress: 0.05, message: "Preparing streams…" });
-
-  const chosen = MIME_CANDIDATES.find((c) => MediaRecorder.isTypeSupported(c.mime));
-  if (!chosen) throw new Error("No supported video codec in this browser");
-
-  const canvasStream = canvas.captureStream(30);
-
-  // Get the audio destination stream from PreviewCanvas's AudioContext.
-  // PreviewCanvas already routes all recitation + ambient audio through this.
-  const audioDest = preview.getAudioDestination?.();
-  
-  let combined: MediaStream;
-  if (audioDest && audioDest.stream.getAudioTracks().length > 0) {
-    combined = new MediaStream([
-      ...canvasStream.getVideoTracks(),
-      ...audioDest.stream.getAudioTracks(),
-    ]);
-  } else {
-    // Fallback: video only (shouldn't happen, but don't crash)
-    console.warn("No audio destination available for export");
-    combined = canvasStream;
-  }
-
-  const recorder = new MediaRecorder(combined, {
-    mimeType: chosen.mime,
-    videoBitsPerSecond: 5_000_000,
-    audioBitsPerSecond: 128_000,
-  });
-
-  const chunks: Blob[] = [];
-  recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-
-  const total = preview.getDuration();
-  const donePromise = new Promise<Blob>((resolve) => {
-    recorder.onstop = () => resolve(new Blob(chunks, { type: chosen.mime }));
-  });
-
-  recorder.start(500);
-  onProgress({ phase: "recording", progress: 0.1, message: "Recording…" });
-  preview.seek(0);
-  await preview.play();
-
-  const started = performance.now();
-  await new Promise<void>((resolve) => {
-    const iv = setInterval(() => {
-      const current = preview.getCurrentTime?.() ?? 0;
-      // Allow progress to slightly trail behind, reaching 95% near the end
-      const p = Math.min(0.95, 0.1 + (current / total) * 0.85);
-      onProgress({ phase: "recording", progress: p });
-      
-      // Stop when current time reaches the total duration (or if fallback elapsed time goes way over)
-      const fallbackElapsed = (performance.now() - started) / 1000;
-      if (current >= total || fallbackElapsed > total + 30) {
-        clearInterval(iv);
-        // Wait an extra 500ms to ensure the last frame/audio is flushed
-        setTimeout(resolve, 500);
-      }
-    }, 250);
-  });
-
-  recorder.stop();
+  if (!canvas || !(duration > 0) || !Number.isFinite(duration)) throw new Error("Preview is not ready.");
+  if (document.hidden) throw new Error("Keep this tab visible while recording.");
   preview.pause();
-  const blob = await donePromise;
-  onProgress({ phase: "done", progress: 1 });
-  return { blob, ext: chosen.ext, mime: chosen.mime };
+  onProgress({ phase: "audio", progress: 0.02, message: "Preparing compatibility audio…" });
+  // Match the MP4 mix. The preview playhead is in source-timeline seconds and
+  // cannot be compared directly to wall-clock duration at 0.75x speed.
+  const audio = await renderExportAudio(preview, settings, duration, signal);
+  await bounded(preview.drawFrame(0, true), "Preparing first frame", signal);
+  const ctx = preview.getAudioContext();
+  if (!ctx) throw new Error("Audio is not available.");
+  await bounded(ctx.resume(), "Starting audio", signal);
+  const width = canvas.width, height = canvas.height;
+  const videoStream = canvas.captureStream(0);
+  const track = videoStream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack;
+  if (!track || typeof track.requestFrame !== "function") {
+    videoStream.getTracks().forEach(item => item.stop());
+    throw new Error("This browser cannot capture video frames reliably. Try Chrome or Edge.");
+  }
+  const destination = ctx.createMediaStreamDestination();
+  const source = ctx.createBufferSource();
+  source.buffer = audio; source.connect(destination);
+  const stream = new MediaStream([...videoStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
+  let recorder: MediaRecorder | undefined;
+  const chunks: Blob[] = [];
+  let recorderError: Error | null = null;
+  try {
+    recorder = new MediaRecorder(stream, {
+      mimeType: chosen.mime,
+      videoBitsPerSecond: Math.round(Math.min(24_000_000, Math.max(2_500_000, width * height * 30 * 0.12))),
+      audioBitsPerSecond: 192_000,
+    });
+    recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+    const stopped = new Promise<void>(resolve => { recorder!.onstop = () => resolve(); });
+    recorder.onerror = () => { recorderError = new Error("Recording failed. Please try another browser."); };
+    recorder.start(500); track.requestFrame();
+    const start = ctx.currentTime;
+    source.start(start);
+    let frame = 0;
+    const wallStart = performance.now();
+    while (true) {
+      throwIfAborted(signal);
+      if (recorderError) throw recorderError;
+      if (recorder.state !== "recording") throw new Error("Recording stopped unexpectedly.");
+      if (document.hidden) throw new Error("Recording interrupted because the tab was hidden. Keep it visible and retry.");
+      if (ctx.state !== "running") throw new Error("Audio was suspended. Keep the app active and retry.");
+      if (canvas.width !== width || canvas.height !== height) throw new Error("The video size changed during export. Please retry.");
+      const elapsed = ctx.currentTime - start;
+      if (elapsed >= duration) break;
+      if ((performance.now() - wallStart) / 1000 > duration + 10) throw new Error("Recording stalled. Please retry.");
+      const next = Math.floor(elapsed * 30);
+      if (next !== frame) {
+        frame = next;
+        const before = ctx.currentTime;
+        await bounded(preview.drawFrame(elapsed * settings.audioSpeed, true), "Recording frame", signal, 10_000);
+        if (ctx.currentTime - before > 0.5) throw new Error("The background is too slow to record in real time. Try 720p or a still background.");
+        track.requestFrame();
+      }
+      onProgress({ phase: "recording", progress: 0.1 + 0.85 * elapsed / duration, message: "Recording — keep this tab visible…" });
+      await bounded(new Promise(resolve => setTimeout(resolve, 16)), "Recording", signal);
+    }
+    recorder.stop();
+    await bounded(stopped, "Finishing recording", signal, 10_000);
+    if (recorderError) throw recorderError;
+    throwIfAborted(signal);
+    const mime = recorder.mimeType || chosen.mime;
+    const blob = new Blob(chunks, { type: mime });
+    if (!blob.size) throw new Error("The recorder produced an empty file.");
+    onProgress({ phase: "done", progress: 1, message: "Done" });
+    return { blob, ext: chosen.ext, mime };
+  } finally {
+    if (recorder?.state !== "inactive") { try { recorder?.stop(); } catch { /* Already stopped. */ } }
+    try { source.stop(); } catch { /* Not started. */ }
+    source.disconnect();
+    // These tracks belong only to this export, not the shared preview destination.
+    stream.getTracks().forEach(item => item.stop());
+    preview.pause(); preview.muteSpeakers(false);
+  }
 }

@@ -1,0 +1,10 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { stripTypeScriptTypes } from 'node:module';
+const src = await readFile(new URL('../build/preview-smoothing.ts', import.meta.url), 'utf8');
+const vite='data:text/javascript;base64,'+Buffer.from('export {}').toString('base64');
+const mod=await import('data:text/javascript;base64,'+Buffer.from(stripTypeScriptTypes(src).replace('from "vite"','from "'+vite+'"')).toString('base64'));
+const fixture=`function getDims(s: ProjectSettings) { return { w: 1080, h: 1920 }; }\n\nlet _audioCtx: AudioContext | null = null;\nfunction drawBlurred(ctx: CanvasRenderingContext2D, src: CanvasImageSource, dx: number, dy: number, dw: number, dh: number, radius: number) { old(); }\nlet _vignette: unknown;\n    const currentSegIdxRef = useRef(0);\n      const { w, h } = getDims(settings);\n  ctx.textAlign = "center"; ctx.fillStyle = s.textColor;`;
+test('preview transform adds live resolution, filtered blur and font refresh',()=>{const out=mod.smoothPreviewSource(fixture);assert.match(out,/getPreviewDims/);assert.match(out,/exporting \? getDims/);assert.match(out,/g\.filter = `blur/);assert.match(out,/document\.fonts\.load/);assert.match(out,/letterSpacing/);assert.doesNotMatch(out,/old\(\)/)});
+test('plugin only transforms PreviewCanvas',()=>{const p=mod.previewSmoothingPlugin();assert.equal(p.transform('x','/src/other.ts'),null);assert.match(p.transform(fixture,'/repo/src/components/wizard/PreviewCanvas.tsx').code,/getPreviewDims/)});

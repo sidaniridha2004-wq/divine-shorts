@@ -3,6 +3,7 @@ import type { ProjectSettings } from "@/lib/project-state";
 import type { ExportProgress, ExportResult } from "./webcodecs-export";
 import { renderExportAudio } from "./audio-mix";
 import { bounded, throwIfAborted } from "./runtime";
+import { startRealtimeBackgroundPlayback } from "../video/background-media";
 export type { ExportProgress } from "./webcodecs-export";
 
 const MIME_CANDIDATES = [
@@ -12,7 +13,6 @@ const MIME_CANDIDATES = [
   { mime: "video/webm", ext: "webm" },
 ];
 
-/** Real-time fallback with its own audio clock and explicitly requested frames. */
 export async function exportVideo(preview: PreviewHandle, onProgress: (p: ExportProgress) => void, settings: ProjectSettings, signal?: AbortSignal): Promise<ExportResult> {
   throwIfAborted(signal);
   if (typeof MediaRecorder === "undefined") throw new Error("This browser does not support video export.");
@@ -24,8 +24,6 @@ export async function exportVideo(preview: PreviewHandle, onProgress: (p: Export
   if (document.hidden) throw new Error("Keep this tab visible while recording.");
   preview.pause();
   onProgress({ phase: "audio", progress: 0.02, message: "Preparing compatibility audio…" });
-  // Match the MP4 mix. The preview playhead is in source-timeline seconds and
-  // cannot be compared directly to wall-clock duration at 0.75x speed.
   const audio = await renderExportAudio(preview, settings, duration, signal);
   await bounded(preview.drawFrame(0, true), "Preparing first frame", signal);
   const ctx = preview.getAudioContext();
@@ -40,21 +38,20 @@ export async function exportVideo(preview: PreviewHandle, onProgress: (p: Export
   }
   const destination = ctx.createMediaStreamDestination();
   const source = ctx.createBufferSource();
-  source.buffer = audio; source.connect(destination);
+  source.buffer = audio;
+  source.connect(destination);
   const stream = new MediaStream([...videoStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
   let recorder: MediaRecorder | undefined;
   const chunks: Blob[] = [];
   let recorderError: Error | null = null;
   try {
-    recorder = new MediaRecorder(stream, {
-      mimeType: chosen.mime,
-      videoBitsPerSecond: Math.round(Math.min(24_000_000, Math.max(2_500_000, width * height * 30 * 0.12))),
-      audioBitsPerSecond: 192_000,
-    });
+    recorder = new MediaRecorder(stream, { mimeType: chosen.mime, videoBitsPerSecond: Math.round(Math.min(24_000_000, Math.max(2_500_000, width * height * 30 * 0.12))), audioBitsPerSecond: 192_000 });
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
     const stopped = new Promise<void>(resolve => { recorder!.onstop = () => resolve(); });
     recorder.onerror = () => { recorderError = new Error("Recording failed. Please try another browser."); };
-    recorder.start(500); track.requestFrame();
+    recorder.start(500);
+    track.requestFrame();
+    await bounded(startRealtimeBackgroundPlayback(settings.audioSpeed, signal), "Starting background video", signal, 10_000);
     const start = ctx.currentTime;
     source.start(start);
     let frame = 0;
@@ -93,8 +90,8 @@ export async function exportVideo(preview: PreviewHandle, onProgress: (p: Export
     if (recorder?.state !== "inactive") { try { recorder?.stop(); } catch { /* Already stopped. */ } }
     try { source.stop(); } catch { /* Not started. */ }
     source.disconnect();
-    // These tracks belong only to this export, not the shared preview destination.
     stream.getTracks().forEach(item => item.stop());
-    preview.pause(); preview.muteSpeakers(false);
+    preview.pause();
+    preview.muteSpeakers(false);
   }
 }

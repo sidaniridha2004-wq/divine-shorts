@@ -1,8 +1,10 @@
+import { renderExportAudio } from "./audio-mix";
 import { ArrayBufferTarget, Muxer } from "mp4-muxer";
 import type { PreviewHandle } from "@/components/wizard/PreviewCanvas";
 import type { ProjectSettings } from "@/lib/project-state";
 import { bounded, throwIfAborted, waitForQueue, MediaExportError } from "./runtime";
-import { renderExportAudio } from "./audio-mix";
+import { isVideoSource } from "../video/background-media";
+import { THEMES } from "../themes";
 
 export type ExportPhase = "preparing" | "audio" | "rendering" | "recording" | "finalizing" | "done";
 export type ExportProgress = { phase: ExportPhase; progress: number; message?: string };
@@ -10,37 +12,24 @@ export type ExportResult = { blob: Blob; ext: string; mime: string };
 const FPS = 30;
 
 export function isWebCodecsExportSupported(): boolean {
-  return typeof VideoEncoder !== "undefined" && typeof AudioEncoder !== "undefined" &&
-    typeof VideoFrame !== "undefined" && typeof AudioData !== "undefined" &&
-    typeof OfflineAudioContext !== "undefined";
+  return typeof VideoEncoder !== "undefined" && typeof AudioEncoder !== "undefined" && typeof VideoFrame !== "undefined" && typeof AudioData !== "undefined" && typeof OfflineAudioContext !== "undefined";
 }
 
 async function pickVideoConfig(width: number, height: number): Promise<VideoEncoderConfig> {
   const bitrate = Math.round(Math.min(24_000_000, Math.max(2_500_000, width * height * FPS * 0.12)));
   for (const codec of ["avc1.640028", "avc1.4D0028", "avc1.42E028"]) {
     for (const hardwareAcceleration of ["prefer-hardware", "no-preference"] as const) {
-      const config: VideoEncoderConfig = {
-        codec, width, height, bitrate, framerate: FPS, hardwareAcceleration,
-        latencyMode: "quality", avc: { format: "avc" },
-      };
-      try {
-        const support = await VideoEncoder.isConfigSupported(config);
-        if (support.supported) return support.config ?? config;
-      } catch { /* Try the next supported encoder. */ }
+      const config: VideoEncoderConfig = { codec, width, height, bitrate, framerate: FPS, hardwareAcceleration, latencyMode: "quality", avc: { format: "avc" } };
+      try { const support = await VideoEncoder.isConfigSupported(config); if (support.supported) return support.config ?? config; } catch { /* next */ }
     }
   }
   throw new Error("No H.264 encoder is available.");
 }
 
-async function drawExportFrame(preview: PreviewHandle, time: number, signal?: AbortSignal): Promise<void> {
-  try {
-    await bounded(preview.drawFrame(time, true), "Rendering background frame", signal);
-    throwIfAborted(signal);
-  } catch (error) {
-    throwIfAborted(signal);
-    // Do not start another recorder on a canvas whose frame failed.
-    throw new MediaExportError(error instanceof Error ? error.message : "Could not render a frame.");
-  }
+function hasVideoBackground(settings: ProjectSettings): boolean {
+  if (settings.bgMode === "per-ayah") return Object.values(settings.ayahBgs).some(url => !!url && isVideoSource(url));
+  if (settings.customBg) return isVideoSource(settings.customBg);
+  return !!THEMES.find(theme => theme.id === settings.themeId)?.video;
 }
 
 export async function exportVideo(preview: PreviewHandle, onProgress: (p: ExportProgress) => void, settings: ProjectSettings, signal?: AbortSignal): Promise<ExportResult> {
@@ -50,9 +39,14 @@ export async function exportVideo(preview: PreviewHandle, onProgress: (p: Export
   if (duration > 600) throw new MediaExportError("Select a shorter range (up to 10 minutes) to avoid running out of memory.");
   let ownsCanvas = false;
   try {
-    onProgress({ phase: "preparing", progress: 0, message: "Preparing background video…" });
+    onProgress({ phase: "preparing", progress: 0, message: "Preparing background…" });
     await preview.beginExport(signal);
     ownsCanvas = true;
+    if (hasVideoBackground(settings)) {
+      onProgress({ phase: "preparing", progress: 0, message: "Buffering video for reliable export…" });
+      const { exportVideo: record } = await import("./mediarecorder-export");
+      return await record(preview, onProgress, settings, signal);
+    }
     if (isWebCodecsExportSupported()) {
       try { return await encode(preview, onProgress, settings, signal); }
       catch (error) {
@@ -66,18 +60,16 @@ export async function exportVideo(preview: PreviewHandle, onProgress: (p: Export
     const { exportVideo: record } = await import("./mediarecorder-export");
     return await record(preview, onProgress, settings, signal);
   } finally {
-    if (ownsCanvas) {
-      preview.endExport();
-      preview.pause();
-      preview.muteSpeakers(false);
-    }
+    if (ownsCanvas) preview.endExport();
+    preview.pause();
+    preview.muteSpeakers(false);
   }
 }
 
 async function encode(preview: PreviewHandle, onProgress: (p: ExportProgress) => void, settings: ProjectSettings, signal?: AbortSignal): Promise<ExportResult> {
   onProgress({ phase: "preparing", progress: 0, message: "Checking export support…" });
   if (typeof document !== "undefined" && document.fonts) await bounded(document.fonts.ready, "Loading fonts", signal);
-  await drawExportFrame(preview, 0, signal);
+  await bounded(preview.drawFrame(0, true), "Preparing first frame", signal);
   const canvas = preview.getCanvas();
   if (!canvas || canvas.width < 2 || canvas.height < 2) throw new MediaExportError("Preview canvas is not ready.");
   const rawWidth = canvas.width, rawHeight = canvas.height;
@@ -91,23 +83,15 @@ async function encode(preview: PreviewHandle, onProgress: (p: ExportProgress) =>
   const audio = await renderExportAudio(preview, settings, duration, signal);
   throwIfAborted(signal);
   const target = new ArrayBufferTarget();
-  const muxer = new Muxer({
-    target, fastStart: "in-memory", firstTimestampBehavior: "offset",
-    video: { codec: "avc", width, height },
-    audio: { codec: "aac", numberOfChannels: 2, sampleRate: audio.sampleRate },
-  });
+  const muxer = new Muxer({ target, fastStart: "in-memory", firstTimestampBehavior: "offset", video: { codec: "avc", width, height }, audio: { codec: "aac", numberOfChannels: 2, sampleRate: audio.sampleRate } });
   let error: Error | null = null;
   const captureError = (value: unknown) => { error ??= value instanceof Error ? value : new Error(String(value)); };
   let videoEncoder: VideoEncoder | undefined;
   let audioEncoder: AudioEncoder | undefined;
   try {
-    videoEncoder = new VideoEncoder({
-      output: (chunk, metadata) => { try { muxer.addVideoChunk(chunk, metadata); } catch (e) { captureError(e); } }, error: captureError,
-    });
+    videoEncoder = new VideoEncoder({ output: (chunk, metadata) => { try { muxer.addVideoChunk(chunk, metadata); } catch (e) { captureError(e); } }, error: captureError });
     videoEncoder.configure(videoConfig);
-    audioEncoder = new AudioEncoder({
-      output: (chunk, metadata) => { try { muxer.addAudioChunk(chunk, metadata); } catch (e) { captureError(e); } }, error: captureError,
-    });
+    audioEncoder = new AudioEncoder({ output: (chunk, metadata) => { try { muxer.addAudioChunk(chunk, metadata); } catch (e) { captureError(e); } }, error: captureError });
     audioEncoder.configure(audioConfig);
     preview.muteSpeakers(true);
     const left = audio.getChannelData(0), right = audio.getChannelData(1);
@@ -130,7 +114,8 @@ async function encode(preview: PreviewHandle, onProgress: (p: ExportProgress) =>
     for (let i = 0; i < frames; i++) {
       throwIfAborted(signal);
       if (error) throw error;
-      await drawExportFrame(preview, i / FPS * settings.audioSpeed, signal);
+      await bounded(preview.drawFrame(i / FPS * settings.audioSpeed, true), "Rendering background frame", signal);
+      throwIfAborted(signal);
       if (canvas.width !== rawWidth || canvas.height !== rawHeight) throw new MediaExportError("Export settings changed. Retry with a fixed resolution.");
       if (scratchCtx) scratchCtx.drawImage(canvas, 0, 0, width, height);
       const timestamp = Math.round(i / FPS * 1e6);

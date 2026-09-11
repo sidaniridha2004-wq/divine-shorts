@@ -8,9 +8,21 @@ export function isVideoSource(url: string): boolean {
   return /^data:video\//i.test(url) || /\.(mp4|webm|mov|m4v)(?:[?#]|$)/i.test(url);
 }
 
-/** One media element per source, shared by preview and deterministic export.
- * Never starts a second decoder/download or replaces a selected video with a poster.
+let activeExportMedia: BackgroundMedia | null = null;
+
+/** Start the already-loaded export video once. Compatibility recording then
+ * draws its continuously decoded frames instead of seeking the CDN 30 times/s.
  */
+export async function startRealtimeBackgroundPlayback(
+  rate: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  const media = activeExportMedia;
+  if (!media) throw new MediaExportError("Background export session is unavailable.");
+  await media.startRealtime(rate, signal);
+}
+
+/** One media element per source, shared by preview and export. */
 export class BackgroundMedia {
   readonly elements = new Map<string, BackgroundElement>();
   readonly ready: Promise<void>;
@@ -18,6 +30,9 @@ export class BackgroundMedia {
   private disposed = false;
   private locked = false;
   private playing = true;
+  private realtime = false;
+  private lastRealtimeProgress = 0;
+  private lastRealtimeWallTime = 0;
 
   constructor(sources: BackgroundSource[]) {
     const loads = sources.map(async source => {
@@ -46,13 +61,17 @@ export class BackgroundMedia {
       }
     });
     this.ready = Promise.all(loads).then(() => { this.assertOpen(); });
-    // Loading starts with the preview, before an exporter awaits it.
     void this.ready.catch(() => {});
   }
 
   private assertOpen() {
     throwIfAborted(this.controller.signal);
     if (this.disposed) throw new MediaExportError("The background changed during export. Please render again.");
+  }
+
+  private videos(keys?: string[]): HTMLVideoElement[] {
+    const values = keys ? keys.map(key => this.get(key)).filter(Boolean) : [...this.elements.values()];
+    return [...new Set(values)].filter((value): value is HTMLVideoElement => value instanceof HTMLVideoElement);
   }
 
   private async load(element: BackgroundElement, url: string): Promise<void> {
@@ -88,44 +107,103 @@ export class BackgroundMedia {
 
   pause(): void {
     this.playing = false;
-    for (const element of this.elements.values()) if (element instanceof HTMLVideoElement) element.pause();
+    for (const element of this.videos()) element.pause();
   }
 
   play(): void {
     if (this.locked || this.disposed) return;
     this.playing = true;
-    for (const element of this.elements.values()) {
-      if (element instanceof HTMLVideoElement && element.readyState >= 2) element.play().catch(() => {});
+    for (const element of this.videos()) {
+      if (element.readyState >= 2) element.play().catch(() => {});
     }
   }
 
   async lock(signal?: AbortSignal): Promise<void> {
     this.assertOpen();
-    this.locked = true; // Set BEFORE loading resolves; late load events must not play.
+    if (activeExportMedia && activeExportMedia !== this) {
+      throw new MediaExportError("Another background export is already running.");
+    }
+    this.locked = true;
+    this.realtime = false;
+    activeExportMedia = this;
     this.pause();
-    await bounded(this.ready, "Preparing background", signal, 60_000);
-    this.assertOpen();
-    throwIfAborted(signal);
-    this.pause();
+    try {
+      await bounded(this.ready, "Preparing background", signal, 60_000);
+      this.assertOpen();
+      throwIfAborted(signal);
+      await Promise.all(this.videos().map(video => seekMedia(video, 0, signal, 30_000)));
+      this.pause();
+    } catch (error) {
+      this.unlock();
+      throw error;
+    }
   }
 
-  unlock(): void { this.locked = false; }
+  unlock(): void {
+    this.realtime = false;
+    this.pause();
+    this.locked = false;
+    if (activeExportMedia === this) activeExportMedia = null;
+  }
+
+  async startRealtime(rate: number, signal?: AbortSignal): Promise<void> {
+    this.assertOpen();
+    throwIfAborted(signal);
+    if (!this.locked || activeExportMedia !== this) throw new MediaExportError("The export does not own the background.");
+    if (!Number.isFinite(rate) || rate <= 0) throw new MediaExportError("Invalid background playback speed.");
+    const videos = this.videos();
+    for (const video of videos) {
+      if (video.readyState < 2 || video.seeking || !video.videoWidth || !video.videoHeight) {
+        throw new MediaExportError("The background video is not ready to record.");
+      }
+      video.playbackRate = rate;
+    }
+    this.realtime = true;
+    this.lastRealtimeProgress = videos[0]?.currentTime ?? 0;
+    this.lastRealtimeWallTime = performance.now();
+    try {
+      await Promise.all(videos.map(video => video.play()));
+    } catch {
+      this.realtime = false;
+      throw new MediaExportError("The browser blocked background playback. Press Render again.");
+    }
+  }
 
   async seek(time: number, keys: string[], signal?: AbortSignal): Promise<void> {
     this.assertOpen();
     if (!this.locked) throw new MediaExportError("The export does not own the background.");
     throwIfAborted(signal);
-    const media = [...new Set(keys.map(key => this.get(key)).filter(Boolean))] as BackgroundElement[];
-    await Promise.all(media.map(async element => {
-      if (!(element instanceof HTMLVideoElement)) return;
-      element.pause();
-      // Duration is read AFTER readiness, not while it is NaN (which froze time at zero).
-      const target = loopTime(time, element.duration);
-      await seekMedia(element, target, signal, 10_000);
+    const videos = this.videos(keys);
+    if (this.realtime) {
+      for (const video of videos) {
+        if (video.error || video.paused || video.seeking || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+          throw new MediaExportError("The background video stopped while recording. Please retry.");
+        }
+      }
+      const lead = videos[0];
+      if (lead) {
+        const now = performance.now();
+        const progressed = Math.abs(lead.currentTime - this.lastRealtimeProgress) > 0.01;
+        if (progressed) {
+          this.lastRealtimeProgress = lead.currentTime;
+          this.lastRealtimeWallTime = now;
+        } else if (now - this.lastRealtimeWallTime > 2_000) {
+          throw new MediaExportError("The background video stalled while recording. Try another clip or 720p.");
+        }
+        const target = loopTime(time, lead.duration);
+        const direct = Math.abs(lead.currentTime - target);
+        const cyclic = Math.min(direct, Math.abs(lead.duration - direct));
+        if (cyclic > 1.5) throw new MediaExportError("The background video fell out of sync while recording. Please retry.");
+      }
+      return;
+    }
+    await Promise.all(videos.map(async video => {
+      const target = loopTime(time, video.duration);
+      await seekMedia(video, target, signal, 30_000);
       this.assertOpen();
       throwIfAborted(signal);
-      if (element.seeking || element.readyState < 2 || !element.videoWidth || !element.videoHeight) {
-        throw new MediaExportError("The background frame is not ready. Export stopped instead of inserting black frames.");
+      if (video.seeking || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+        throw new MediaExportError("The background frame is not ready. Export stopped instead of inserting a black frame.");
       }
     }));
   }
@@ -134,6 +212,7 @@ export class BackgroundMedia {
     if (this.disposed) return;
     this.disposed = true;
     this.controller.abort();
+    this.unlock();
     for (const element of this.elements.values()) {
       if (element instanceof HTMLVideoElement) {
         element.pause();

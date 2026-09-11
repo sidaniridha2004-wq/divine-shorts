@@ -6,6 +6,18 @@ import { bounded, throwIfAborted } from "./runtime";
 import { startRealtimeBackgroundPlayback } from "../video/background-media";
 export type { ExportProgress } from "./webcodecs-export";
 
+const FPS = 30;
+
+function nextAnimationFrame(signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(signal.reason); return; }
+    const id = requestAnimationFrame(() => { cleanup(); resolve(); });
+    const abort = () => { cancelAnimationFrame(id); cleanup(); reject(signal?.reason); };
+    const cleanup = () => signal?.removeEventListener("abort", abort);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
 const MIME_CANDIDATES = [
   { mime: "video/mp4;codecs=avc1,mp4a.40.2", ext: "mp4" },
   { mime: "video/webm;codecs=vp9,opus", ext: "webm" },
@@ -13,7 +25,12 @@ const MIME_CANDIDATES = [
   { mime: "video/webm", ext: "webm" },
 ];
 
-export async function exportVideo(preview: PreviewHandle, onProgress: (p: ExportProgress) => void, settings: ProjectSettings, signal?: AbortSignal): Promise<ExportResult> {
+export async function exportVideo(
+  preview: PreviewHandle,
+  onProgress: (p: ExportProgress) => void,
+  settings: ProjectSettings,
+  signal?: AbortSignal,
+): Promise<ExportResult> {
   throwIfAborted(signal);
   if (typeof MediaRecorder === "undefined") throw new Error("This browser does not support video export.");
   const chosen = MIME_CANDIDATES.find(item => MediaRecorder.isTypeSupported(item.mime));
@@ -30,11 +47,11 @@ export async function exportVideo(preview: PreviewHandle, onProgress: (p: Export
   if (!ctx) throw new Error("Audio is not available.");
   await bounded(ctx.resume(), "Starting audio", signal);
   const width = canvas.width, height = canvas.height;
-  const videoStream = canvas.captureStream(0);
-  const track = videoStream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack;
-  if (!track || typeof track.requestFrame !== "function") {
+  const videoStream = canvas.captureStream(FPS);
+  const track = videoStream.getVideoTracks()[0];
+  if (!track) {
     videoStream.getTracks().forEach(item => item.stop());
-    throw new Error("This browser cannot capture video frames reliably. Try Chrome or Edge.");
+    throw new Error("This browser cannot capture the preview canvas. Try Chrome or Edge.");
   }
   const destination = ctx.createMediaStreamDestination();
   const source = ctx.createBufferSource();
@@ -45,16 +62,19 @@ export async function exportVideo(preview: PreviewHandle, onProgress: (p: Export
   const chunks: Blob[] = [];
   let recorderError: Error | null = null;
   try {
-    recorder = new MediaRecorder(stream, { mimeType: chosen.mime, videoBitsPerSecond: Math.round(Math.min(24_000_000, Math.max(2_500_000, width * height * 30 * 0.12))), audioBitsPerSecond: 192_000 });
+    recorder = new MediaRecorder(stream, {
+      mimeType: chosen.mime,
+      videoBitsPerSecond: Math.round(Math.min(24_000_000, Math.max(2_500_000, width * height * FPS * 0.12))),
+      audioBitsPerSecond: 192_000,
+    });
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
     const stopped = new Promise<void>(resolve => { recorder!.onstop = () => resolve(); });
     recorder.onerror = () => { recorderError = new Error("Recording failed. Please try another browser."); };
     recorder.start(500);
-    track.requestFrame();
     await bounded(startRealtimeBackgroundPlayback(settings.audioSpeed, signal), "Starting background video", signal, 10_000);
     const start = ctx.currentTime;
     source.start(start);
-    let frame = 0;
+    let frame = -1;
     const wallStart = performance.now();
     while (true) {
       throwIfAborted(signal);
@@ -66,16 +86,15 @@ export async function exportVideo(preview: PreviewHandle, onProgress: (p: Export
       const elapsed = ctx.currentTime - start;
       if (elapsed >= duration) break;
       if ((performance.now() - wallStart) / 1000 > duration + 10) throw new Error("Recording stalled. Please retry.");
-      const next = Math.floor(elapsed * 30);
+      const next = Math.floor(elapsed * FPS);
       if (next !== frame) {
         frame = next;
         const before = ctx.currentTime;
         await bounded(preview.drawFrame(elapsed * settings.audioSpeed, true), "Recording frame", signal, 10_000);
         if (ctx.currentTime - before > 0.5) throw new Error("The background is too slow to record in real time. Try 720p or a still background.");
-        track.requestFrame();
       }
       onProgress({ phase: "recording", progress: 0.1 + 0.85 * elapsed / duration, message: "Recording — keep this tab visible…" });
-      await bounded(new Promise(resolve => setTimeout(resolve, 16)), "Recording", signal);
+      await bounded(nextAnimationFrame(signal), "Recording", signal, 2_000);
     }
     recorder.stop();
     await bounded(stopped, "Finishing recording", signal, 10_000);

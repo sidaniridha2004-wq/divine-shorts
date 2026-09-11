@@ -9,6 +9,7 @@ const pixabayUrl='data:text/javascript;base64,'+Buffer.from('export async functi
 const code=stripTypeScriptTypes(source).replace('from "../export/runtime"','from "'+runtimeUrl+'"').replace('from "../pixabay-api"','from "'+pixabayUrl+'"');
 const mod=await import('data:text/javascript;base64,'+Buffer.from(code).toString('base64'));
 const {BackgroundMedia,startRealtimeBackgroundPlayback}=mod;
+const recorderSource = await readFile(new URL('../src/lib/export/mediarecorder-export.ts', import.meta.url),'utf8');
 let options={},instances=[];
 class Video extends EventTarget{
  constructor(){super();this.src='';this.readyState=0;this.videoWidth=0;this.videoHeight=0;this.duration=4;this.currentTime=0;this.paused=true;this.seeking=false;this.error=null;this.playbackRate=1;this.seeks=0;this.plays=0;instances.push(this)}
@@ -21,6 +22,7 @@ class Video extends EventTarget{
 }
 globalThis.HTMLVideoElement=Video;globalThis.document={createElement:()=>new Video()};
 function make(opts={}){options=opts;instances=[];return new BackgroundMedia([{key:'global',url:'clip.mp4',kind:'video'}])}
+test('recorder uses a fixed-rate stream and animation clock',()=>{assert.match(recorderSource,/captureStream\(FPS\)/);assert.match(recorderSource,/requestAnimationFrame/);assert.doesNotMatch(recorderSource,/requestFrame\(/)});
 test('continuous export performs one initial seek, not one seek per frame',async()=>{const m=make({seekMs:5});try{await m.lock();const v=instances[0],before=v.seeks;await startRealtimeBackgroundPlayback(1);for(let i=0;i<1500;i++){v._time=(i/30)%4;await m.seek(i/30,['global'])}assert.equal(v.seeks,before);assert.equal(v.plays,1)}finally{m.close()}});
 test('slow CDN seek is paid once during preparation',async()=>{const m=make({seekMs:350});try{await m.ready;instances[0]._time=2;const start=performance.now();await m.lock();assert.ok(performance.now()-start>=300);await startRealtimeBackgroundPlayback(.75);for(let i=0;i<300;i++){instances[0]._time=(i/30*.75)%4;await m.seek(i/30*.75,['global'])}assert.equal(instances[0].seeks,1);assert.equal(instances[0].playbackRate,.75)}finally{m.close()}});
 test('paused, buffering and stalled playback reject instead of creating black frames',async()=>{const m=make();try{await m.lock();await startRealtimeBackgroundPlayback(1);const v=instances[0];v.paused=true;await assert.rejects(m.seek(.1,['global']),/stopped/);v.paused=false;v.readyState=1;await assert.rejects(m.seek(.2,['global']),/stopped/)}finally{m.close()}});
